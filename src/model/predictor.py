@@ -1,16 +1,15 @@
-"""
-Modelo predictivo de subida de precio.
+"""Modelo predictivo de subida de precio.
 
-Entrena un ensemble stacking de 3 clasificadores (LightGBM, XGBoost,
-Random Forest) con un meta-modelo LogisticRegression encima.  Los
-hiperparametros se optimizan automaticamente con Optuna y las features
-se filtran eliminando las de baja importancia.
+Entrena un ensemble voting de 3 clasificadores (LightGBM, XGBoost,
+Random Forest) con voto suave (soft voting).  Los hiperparametros se
+optimizan automaticamente con Optuna y las features se filtran
+eliminando las de baja importancia.
 
 Expone metodos para:
 - Preparar datos de entrenamiento (labeling).
 - Optimizar hiperparametros (Optuna).
 - Seleccionar features automaticamente.
-- Entrenar y guardar el stacking ensemble.
+- Entrenar y guardar el voting ensemble.
 - Cargar un ensemble guardado.
 - Predecir probabilidades sobre datos nuevos.
 
@@ -29,8 +28,7 @@ import numpy as np
 import optuna
 import pandas as pd
 import xgboost as xgb
-from sklearn.ensemble import RandomForestClassifier, StackingClassifier
-from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.metrics import classification_report, roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
@@ -178,17 +176,17 @@ def _select_features(
 
 
 # ------------------------------------------------------------------
-# Stacking ensemble builder
+# Voting ensemble builder
 # ------------------------------------------------------------------
 
-def _build_stacking(
+def _build_voting(
     lgbm_params: dict[str, Any],
     spw: float,
-) -> StackingClassifier:
-    """Construye un StackingClassifier con LightGBM, XGBoost y RF.
+) -> VotingClassifier:
+    """Construye un VotingClassifier (soft) con LightGBM, XGBoost y RF.
 
-    El meta-modelo es una LogisticRegression que aprende a ponderar
-    las probabilidades de cada modelo base de forma optima.
+    Cada modelo vota con sus probabilidades y se promedian.
+    Los hiperparametros de Optuna se comparten entre modelos.
     """
     lgbm = lgb.LGBMClassifier(
         **lgbm_params,
@@ -217,18 +215,9 @@ def _build_stacking(
         random_state=42,
         n_jobs=-1,
     )
-    meta = LogisticRegression(
-        C=1.0,
-        max_iter=1000,
-        class_weight="balanced",
-        random_state=42,
-    )
-    return StackingClassifier(
+    return VotingClassifier(
         estimators=[("lgbm", lgbm), ("xgb", xgb_clf), ("rf", rf)],
-        final_estimator=meta,
-        cv=3,
-        stack_method="predict_proba",
-        passthrough=False,
+        voting="soft",
         n_jobs=-1,
     )
 
@@ -238,12 +227,12 @@ def _build_stacking(
 # ------------------------------------------------------------------
 
 class PricePredictor:
-    """Stacking ensemble (LightGBM + XGBoost + Random Forest + meta LR)
+    """Voting ensemble (LightGBM + XGBoost + Random Forest)
     con optimizacion Optuna y feature selection automatica."""
 
     def __init__(self, config: ModelConfig) -> None:
         self._config = config
-        self._model: StackingClassifier | None = None
+        self._model: VotingClassifier | None = None
         self._feature_cols = get_feature_columns(include_btc=True)
         self._selected_features: list[str] | None = None
 
@@ -258,7 +247,7 @@ class PricePredictor:
         1. Preparar datos (features + labels).
         2. Optuna -- buscar mejores hiperparametros.
         3. Feature selection -- eliminar features ruidosas.
-        4. Stacking ensemble -- entrenar con los parametros optimos.
+        4. Voting ensemble -- entrenar con los parametros optimos.
         5. Evaluar con TimeSeriesSplit.
 
         Extrae BTCUSDT del dict para usarlo como features de mercado.
@@ -343,17 +332,17 @@ class PricePredictor:
             X_train, X_val = X_sel.iloc[train_idx], X_sel.iloc[val_idx]
             y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
-            stack = _build_stacking(best_params, spw)
-            stack.fit(X_train, y_train)
+            ensemble = _build_voting(best_params, spw)
+            ensemble.fit(X_train, y_train)
 
-            # AUC del stacking
-            y_prob = stack.predict_proba(X_val)[:, 1]
+            # AUC del voting ensemble
+            y_prob = ensemble.predict_proba(X_val)[:, 1]
             auc = roc_auc_score(y_val, y_prob)
             auc_scores.append(auc)
-            logger.info("Fold %d -- Stacking AUC: %.4f", fold, auc)
+            logger.info("Fold %d -- Voting AUC: %.4f", fold, auc)
 
             # AUC por modelo individual
-            for name, estimator in stack.named_estimators_.items():
+            for name, estimator in ensemble.named_estimators_.items():
                 y_prob_i = estimator.predict_proba(X_val)[:, 1]
                 auc_i = roc_auc_score(y_val, y_prob_i)
                 per_model_auc[name].append(auc_i)
@@ -367,14 +356,14 @@ class PricePredictor:
         # Paso 4: Entrenamiento final con todos los datos
         # ----------------------------------------------------------
         logger.info("Paso 4/4: Entrenamiento final con todos los datos...")
-        self._model = _build_stacking(best_params, spw)
+        self._model = _build_voting(best_params, spw)
         self._model.fit(X_sel, y)
 
         # Reporte
         y_pred = self._model.predict(X_sel)
         report = classification_report(y, y_pred, output_dict=True)
         logger.info(
-            "Reporte final (stacking):\n%s", classification_report(y, y_pred),
+            "Reporte final (voting):\n%s", classification_report(y, y_pred),
         )
 
         mean_auc = float(np.mean(auc_scores))
@@ -394,7 +383,7 @@ class PricePredictor:
         for name, scores in per_model_auc.items():
             metrics[f"auc_{name}"] = float(np.mean(scores))
 
-        logger.info("Stacking AUC medio CV: %.4f", mean_auc)
+        logger.info("Voting AUC medio CV: %.4f", mean_auc)
         logger.info(
             "Features: %d seleccionadas de %d originales",
             len(self._selected_features), len(self._feature_cols),
@@ -462,7 +451,7 @@ class PricePredictor:
             "selected_features": self._selected_features,
         }
         joblib.dump(payload, save_path)
-        logger.info("Stacking ensemble guardado en %s", save_path)
+        logger.info("Voting ensemble guardado en %s", save_path)
         return save_path
 
     def load(self, path: Path | None = None) -> None:
