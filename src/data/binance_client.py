@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
+import requests as _requests
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
@@ -24,20 +25,85 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# Endpoints alternativos de Binance (por si el principal falla).
+_BINANCE_ENDPOINTS = [
+    "https://api.binance.com/api",
+    "https://api1.binance.com/api",
+    "https://api2.binance.com/api",
+    "https://api3.binance.com/api",
+]
+
+
+def _find_working_endpoint(timeout: int = 10) -> str | None:
+    """Prueba endpoints de Binance y devuelve el primero que responda."""
+    for endpoint in _BINANCE_ENDPOINTS:
+        try:
+            resp = _requests.get(f"{endpoint}/v3/ping", timeout=timeout)
+            if resp.status_code == 200:
+                logger.info("Endpoint accesible: %s", endpoint)
+                return endpoint
+        except Exception as exc:
+            logger.debug("Endpoint %s no accesible: %s", endpoint, exc)
+    return None
+
+
 class BinanceDataClient:
     """Lectura de datos de mercado desde Binance."""
 
     def __init__(self, config: BinanceConfig) -> None:
-        try:
-            self._client = Client(config.api_key, config.api_secret)
-        except Exception as exc:
-            logger.warning("No se pudo conectar a Binance: %s", exc)
-            self._client = None  # type: ignore[assignment]
+        self._client: Client | None = None
+
+        # 1. Comprobar conectividad con Binance antes de crear el Client.
+        working_endpoint = _find_working_endpoint()
+        if working_endpoint is None:
+            logger.warning(
+                "No se pudo conectar a ningun endpoint de Binance. "
+                "Posible problema de red."
+            )
+            return
+
+        # 2. Crear el Client. El constructor de python-binance hace ping
+        #    al endpoint por defecto; si falla, capturamos y reintentamos
+        #    sin credenciales (API publica — suficiente para datos de mercado).
+        api_key = config.api_key
+        api_secret = config.api_secret
+
+        for label, key, secret in [
+            ("auth", api_key, api_secret),
+            ("public", "", ""),
+        ]:
+            try:
+                client = Client(key, secret, {"timeout": 20})
+                # Asegurar que usamos el endpoint que ya sabemos que funciona.
+                client.API_URL = working_endpoint
+                client.ping()
+                self._client = client
+                logger.info(
+                    "Conectado a Binance (%s) via %s",
+                    label,
+                    working_endpoint,
+                )
+                return
+            except Exception as exc:
+                logger.warning(
+                    "Client(%s) fallo: %s: %s",
+                    label,
+                    type(exc).__name__,
+                    exc,
+                )
+
+        logger.error("No se pudo crear un Client de Binance funcional.")
 
     @property
     def is_connected(self) -> bool:
         """Indica si la conexión con Binance está activa."""
         return self._client is not None
+
+    def _ensure_connected(self) -> Client:
+        """Devuelve el cliente o lanza ConnectionError."""
+        if self._client is None:
+            raise ConnectionError("No hay conexión con Binance.")
+        return self._client
 
     # ------------------------------------------------------------------
     # Datos de mercado
