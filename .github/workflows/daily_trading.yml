@@ -1,0 +1,102 @@
+# Ejecución diaria del bot de trading a las 07:00 UTC.
+#
+# Los secrets de Binance, SendGrid y email se configuran en
+# Settings > Secrets and variables > Actions del repositorio.
+
+name: Daily Trading Bot
+
+on:
+  schedule:
+    # Todos los días a las 07:00 UTC
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+    # Permite ejecución manual desde la UI de GitHub
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install .
+
+      - name: Download saved model (if exists)
+        uses: actions/cache@v4
+        with:
+          path: models/
+          key: model-${{ github.sha }}
+          restore-keys: |
+            model-
+
+      - name: Run trading bot
+        env:
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          TRADING_MODE: ${{ secrets.TRADING_MODE || 'paper' }}
+        run: python -m src.main
+
+      - name: Save model after run
+        uses: actions/cache/save@v4
+        with:
+          path: models/
+          key: model-${{ github.sha }}
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 30
+
+  # Re-entrenamiento semanal (domingos a las 06:00 UTC)
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event.schedule == '0 7 * * 0' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install .
+
+      - name: Train model
+        env:
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
+        run: python -m src.main train
+
+      - name: Save trained model
+        uses: actions/cache/save@v4
+        with:
+          path: models/
+          key: model-${{ github.sha }}
+
+      - name: Upload training logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 30
