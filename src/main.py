@@ -233,12 +233,17 @@ def run_train_only(config: AppConfig | None = None) -> None:
     """Solo entrena el modelo (no opera). Útil para primer setup."""
     config = config or load_config()
     logger.info("Modo ENTRENAMIENTO — solo entrena el modelo, no opera")
+    logger.info(
+        "BINANCE_API_KEY configurada: %s (len=%d)",
+        bool(config.binance.api_key),
+        len(config.binance.api_key),
+    )
 
     data_client = BinanceDataClient(config.binance)
     if not data_client.is_connected:
         logger.error(
-            "No se pudo conectar a Binance. "
-            "Verifica BINANCE_API_KEY y BINANCE_API_SECRET."
+            "No se pudo conectar a Binance tras probar multiples endpoints. "
+            "Revisa los logs anteriores para mas detalle."
         )
         sys.exit(1)
 
