@@ -4,7 +4,7 @@ Orquestador principal del bot de trading.
 Este es el punto de entrada.  Coordina todos los módulos:
 1. Carga configuración.
 2. Conecta con Binance.
-3. Obtiene datos de las top 200 monedas.
+3. Obtiene datos de las top 50 monedas por liquidez.
 4. Ejecuta (o entrena) el modelo predictivo.
 5. Decide qué comprar/vender.
 6. Ejecuta las órdenes.

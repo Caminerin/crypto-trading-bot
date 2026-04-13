@@ -1,13 +1,16 @@
 """
 Modelo predictivo de subida de precio.
 
-Entrena un clasificador LightGBM para predecir si una moneda subirá
-más de un 2 % en las próximas 24 horas.  Expone métodos para:
+Entrena un clasificador LightGBM para predecir si una moneda subira
+mas de un X% en las proximas N horas (configurable).  Expone metodos para:
 
 - Preparar datos de entrenamiento (labeling).
 - Entrenar y guardar el modelo.
 - Cargar un modelo guardado.
 - Predecir probabilidades sobre datos nuevos.
+
+Features incluyen indicadores tecnicos de la moneda, lags a corto/medio/largo
+plazo, features temporales y features de BTC como proxy del mercado.
 """
 
 from __future__ import annotations
@@ -51,27 +54,38 @@ class PricePredictor:
     def __init__(self, config: ModelConfig) -> None:
         self._config = config
         self._model: lgb.LGBMClassifier | None = None
-        self._feature_cols = get_feature_columns()
+        self._feature_cols = get_feature_columns(include_btc=True)
 
     # ------------------------------------------------------------------
     # Entrenamiento
     # ------------------------------------------------------------------
 
     def train(self, klines_by_symbol: dict[str, pd.DataFrame]) -> dict[str, float]:
-        """Entrena el modelo con datos de múltiples monedas.
+        """Entrena el modelo con datos de multiples monedas.
 
-        Devuelve métricas de evaluación.
+        Extrae BTCUSDT del dict para usarlo como features de mercado.
+        Devuelve metricas de evaluacion.
         """
         logger.info("Preparando datos de entrenamiento con %d monedas", len(klines_by_symbol))
 
+        # Extraer BTC como proxy del mercado
+        btc_df = klines_by_symbol.get("BTCUSDT")
+        if btc_df is not None:
+            logger.info("BTCUSDT disponible como proxy de mercado (%d filas)", len(btc_df))
+        else:
+            logger.warning("BTCUSDT no encontrado — features de BTC no disponibles")
+
+        horizon = self._config.target_horizon_hours
         all_X: list[pd.DataFrame] = []
         all_y: list[pd.Series] = []
 
         for symbol, df in klines_by_symbol.items():
-            featured = compute_features(df)
-            labels = create_labels(featured, self._config.target_pct_change)
+            featured = compute_features(df, btc_df=btc_df)
+            labels = create_labels(
+                featured, self._config.target_pct_change, horizon=horizon,
+            )
 
-            # Eliminar filas sin label (últimas *horizon* velas)
+            # Eliminar filas sin label (ultimas *horizon* velas)
             valid_mask = labels.notna()
             featured = featured.loc[valid_mask]
             labels = labels.loc[valid_mask]
@@ -166,16 +180,19 @@ class PricePredictor:
     def predict(self, klines_by_symbol: dict[str, pd.DataFrame]) -> dict[str, float]:
         """Devuelve {symbol: probabilidad_subida} para cada moneda.
 
-        Solo incluye la última fila de features de cada moneda
+        Extrae BTCUSDT del dict para features de mercado.
+        Solo incluye la ultima fila de features de cada moneda
         (= estado actual del mercado).
         """
         if self._model is None:
-            raise RuntimeError("El modelo no está entrenado ni cargado.")
+            raise RuntimeError("El modelo no esta entrenado ni cargado.")
+
+        btc_df = klines_by_symbol.get("BTCUSDT")
 
         predictions: dict[str, float] = {}
         for symbol, df in klines_by_symbol.items():
             try:
-                featured = compute_features(df)
+                featured = compute_features(df, btc_df=btc_df)
                 if featured.empty:
                     continue
                 last_row = featured[self._feature_cols].iloc[[-1]]
