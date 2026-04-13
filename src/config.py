@@ -57,7 +57,8 @@ class RiskConfig:
 
 @dataclass(frozen=True)
 class EmailConfig:
-    sendgrid_api_key: str = os.getenv("SENDGRID_API_KEY", "")
+    mailjet_api_key: str = os.getenv("MAILJET_API_KEY", "")
+    mailjet_api_secret: str = os.getenv("MAILJET_API_SECRET", "")
     email_from: str = os.getenv("EMAIL_FROM", "")
     email_to: str = os.getenv("EMAIL_TO", "")
 
