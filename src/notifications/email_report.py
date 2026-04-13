@@ -1,8 +1,8 @@
 """
-Generación y envío de reportes por email vía SendGrid.
+Generacion y envio de reportes por email via Mailjet.
 
 Construye un email HTML con:
-- Resumen de cartera (antes y después).
+- Resumen de cartera (antes y despues).
 - Operaciones ejecutadas.
 - Predicciones del modelo.
 - P&L estimado.
@@ -29,19 +29,18 @@ def send_daily_report(
     predictions: dict[str, float],
     is_paper: bool,
 ) -> bool:
-    """Envía el reporte diario por email.
+    """Envia el reporte diario por email.
 
-    Devuelve True si el envío fue exitoso.
+    Devuelve True si el envio fue exitoso.
     """
-    if not config.sendgrid_api_key:
-        logger.warning("SendGrid API key no configurada. No se envía email.")
+    if not config.mailjet_api_key or not config.mailjet_api_secret:
+        logger.warning("Mailjet API key/secret no configuradas. No se envia email.")
         return False
 
     try:
-        from sendgrid import SendGridAPIClient
-        from sendgrid.helpers.mail import Content, Mail
+        from mailjet_rest import Client as MailjetClient
     except ImportError:
-        logger.error("sendgrid no está instalado. Ejecuta: pip install sendgrid")
+        logger.error("mailjet-rest no esta instalado. Ejecuta: pip install mailjet-rest")
         return False
 
     subject = _build_subject(total_value_before, total_value_after, is_paper)
@@ -55,18 +54,29 @@ def send_daily_report(
         is_paper=is_paper,
     )
 
-    message = Mail(
-        from_email=config.email_from,
-        to_emails=config.email_to,
-        subject=subject,
-        html_content=Content("text/html", html_body),
+    mailjet = MailjetClient(
+        auth=(config.mailjet_api_key, config.mailjet_api_secret),
+        version="v3.1",
     )
 
+    data = {
+        "Messages": [
+            {
+                "From": {"Email": config.email_from, "Name": "Crypto Trading Bot"},
+                "To": [{"Email": config.email_to}],
+                "Subject": subject,
+                "HTMLPart": html_body,
+            }
+        ]
+    }
+
     try:
-        sg = SendGridAPIClient(config.sendgrid_api_key)
-        response = sg.send(message)
-        logger.info("Email enviado — status=%d", response.status_code)
-        return response.status_code in (200, 201, 202)
+        response = mailjet.send.create(data=data)
+        status = response.status_code
+        logger.info("Email enviado — status=%d", status)
+        if status != 200:
+            logger.error("Mailjet respuesta: %s", response.json())
+        return status == 200
     except Exception as exc:
         logger.error("Error enviando email: %s", exc)
         return False
@@ -141,75 +151,89 @@ def _build_html_body(
         'font-weight:bold">LIVE</span>'
     )
 
-    return f"""
-    <html>
-    <body style="font-family:Arial,sans-serif;max-width:800px;margin:0 auto;padding:20px">
-        <h1>Crypto Trading Bot — Reporte Diario</h1>
-        <p>{now} | {mode_badge}</p>
+    no_ops_msg = "<p>No se ejecutaron operaciones hoy.</p>"
+    no_preds_msg = "<p>Sin predicciones disponibles (modelo no entrenado o sin datos).</p>"
 
-        <h2>Resumen</h2>
-        <table style="border-collapse:collapse;width:100%">
-            <tr>
-                <td style="padding:8px;border:1px solid #ddd"><strong>Balance anterior</strong></td>
-                <td style="padding:8px;border:1px solid #ddd">${total_value_before:,.2f}</td>
-            </tr>
-            <tr>
-                <td style="padding:8px;border:1px solid #ddd"><strong>Balance actual</strong></td>
-                <td style="padding:8px;border:1px solid #ddd">${total_value_after:,.2f}</td>
-            </tr>
-            <tr>
-                <td style="padding:8px;border:1px solid #ddd"><strong>P&L</strong></td>
-                <td style="padding:8px;border:1px solid #ddd;color:{pnl_color};font-weight:bold">
-                    {"+" if pnl >= 0 else ""}${pnl:,.2f} ({pnl_pct:+.2f}%)
-                </td>
-            </tr>
-        </table>
+    if results:
+        ops_section = (
+            '<table style="border-collapse:collapse;width:100%">'
+            '<tr style="background:#f8f9fa">'
+            '<th style="padding:8px;border:1px solid #ddd">Accion</th>'
+            '<th style="padding:8px;border:1px solid #ddd">Moneda</th>'
+            '<th style="padding:8px;border:1px solid #ddd">Cantidad</th>'
+            '<th style="padding:8px;border:1px solid #ddd">Precio</th>'
+            '<th style="padding:8px;border:1px solid #ddd">Prob.</th>'
+            '<th style="padding:8px;border:1px solid #ddd">Estado</th>'
+            '<th style="padding:8px;border:1px solid #ddd">Razon</th>'
+            "</tr>"
+            f"{ops_rows}"
+            "</table>"
+        )
+    else:
+        ops_section = no_ops_msg
 
-        <h2>Operaciones Ejecutadas ({len(results)})</h2>
-        {"<p>No se ejecutaron operaciones hoy.</p>" if not results else f'''
-        <table style="border-collapse:collapse;width:100%">
-            <tr style="background:#f8f9fa">
-                <th style="padding:8px;border:1px solid #ddd">Accion</th>
-                <th style="padding:8px;border:1px solid #ddd">Moneda</th>
-                <th style="padding:8px;border:1px solid #ddd">Cantidad</th>
-                <th style="padding:8px;border:1px solid #ddd">Precio</th>
-                <th style="padding:8px;border:1px solid #ddd">Prob.</th>
-                <th style="padding:8px;border:1px solid #ddd">Estado</th>
-                <th style="padding:8px;border:1px solid #ddd">Razon</th>
-            </tr>
-            {ops_rows}
-        </table>
-        '''}
+    if predictions:
+        preds_section = (
+            '<table style="border-collapse:collapse;width:100%">'
+            '<tr style="background:#f8f9fa">'
+            '<th style="padding:8px;border:1px solid #ddd">Moneda</th>'
+            '<th style="padding:8px;border:1px solid #ddd">Prob. subida &gt;2%</th>'
+            '<th style="padding:8px;border:1px solid #ddd">Confianza</th>'
+            "</tr>"
+            f"{pred_rows}"
+            "</table>"
+        )
+    else:
+        preds_section = no_preds_msg
 
-        <h2>Top 20 Predicciones</h2>
-        <table style="border-collapse:collapse;width:100%">
-            <tr style="background:#f8f9fa">
-                <th style="padding:8px;border:1px solid #ddd">Moneda</th>
-                <th style="padding:8px;border:1px solid #ddd">Prob. subida &gt;2%</th>
-                <th style="padding:8px;border:1px solid #ddd">Confianza</th>
-            </tr>
-            {pred_rows}
-        </table>
+    portfolio_rows = "".join(
+        f'<tr><td style="padding:8px;border:1px solid #ddd">{asset}</td>'
+        f'<td style="padding:8px;border:1px solid #ddd">{qty:.8f}</td></tr>'
+        for asset, qty in sorted(portfolio_after.items())
+        if qty > 0
+    )
 
-        <h2>Cartera Actual</h2>
-        <table style="border-collapse:collapse;width:100%">
-            <tr style="background:#f8f9fa">
-                <th style="padding:8px;border:1px solid #ddd">Activo</th>
-                <th style="padding:8px;border:1px solid #ddd">Cantidad</th>
-            </tr>
-            {"".join(
-                f'<tr><td style="padding:8px;border:1px solid #ddd">{asset}</td>'
-                f'<td style="padding:8px;border:1px solid #ddd">{qty:.8f}</td></tr>'
-                for asset, qty in sorted(portfolio_after.items())
-                if qty > 0
-            )}
-        </table>
+    pnl_sign = "+" if pnl >= 0 else ""
 
-        <hr>
-        <p style="color:#999;font-size:12px">
-            Generado automaticamente por Crypto Trading Bot.
-            Esto no es asesoramiento financiero.
-        </p>
-    </body>
-    </html>
-    """
+    return (
+        "<html>"
+        '<body style="font-family:Arial,sans-serif;max-width:800px;margin:0 auto;padding:20px">'
+        "<h1>Crypto Trading Bot — Reporte Diario</h1>"
+        f"<p>{now} | {mode_badge}</p>"
+        "<h2>Resumen</h2>"
+        '<table style="border-collapse:collapse;width:100%">'
+        "<tr>"
+        '<td style="padding:8px;border:1px solid #ddd"><strong>Balance anterior</strong></td>'
+        f'<td style="padding:8px;border:1px solid #ddd">${total_value_before:,.2f}</td>'
+        "</tr>"
+        "<tr>"
+        '<td style="padding:8px;border:1px solid #ddd"><strong>Balance actual</strong></td>'
+        f'<td style="padding:8px;border:1px solid #ddd">${total_value_after:,.2f}</td>'
+        "</tr>"
+        "<tr>"
+        '<td style="padding:8px;border:1px solid #ddd"><strong>P&amp;L</strong></td>'
+        f'<td style="padding:8px;border:1px solid #ddd;color:{pnl_color};font-weight:bold">'
+        f"{pnl_sign}${pnl:,.2f} ({pnl_pct:+.2f}%)"
+        "</td>"
+        "</tr>"
+        "</table>"
+        f"<h2>Operaciones Ejecutadas ({len(results)})</h2>"
+        f"{ops_section}"
+        "<h2>Top 20 Predicciones</h2>"
+        f"{preds_section}"
+        "<h2>Cartera Actual</h2>"
+        '<table style="border-collapse:collapse;width:100%">'
+        '<tr style="background:#f8f9fa">'
+        '<th style="padding:8px;border:1px solid #ddd">Activo</th>'
+        '<th style="padding:8px;border:1px solid #ddd">Cantidad</th>'
+        "</tr>"
+        f"{portfolio_rows}"
+        "</table>"
+        "<hr>"
+        '<p style="color:#999;font-size:12px">'
+        "Generado automaticamente por Crypto Trading Bot. "
+        "Esto no es asesoramiento financiero."
+        "</p>"
+        "</body>"
+        "</html>"
+    )
