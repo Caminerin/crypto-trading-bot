@@ -28,7 +28,16 @@ class BinanceDataClient:
     """Lectura de datos de mercado desde Binance."""
 
     def __init__(self, config: BinanceConfig) -> None:
-        self._client = Client(config.api_key, config.api_secret)
+        try:
+            self._client = Client(config.api_key, config.api_secret)
+        except Exception as exc:
+            logger.warning("No se pudo conectar a Binance: %s", exc)
+            self._client = None  # type: ignore[assignment]
+
+    @property
+    def is_connected(self) -> bool:
+        """Indica si la conexión con Binance está activa."""
+        return self._client is not None
 
     # ------------------------------------------------------------------
     # Datos de mercado
@@ -36,6 +45,8 @@ class BinanceDataClient:
 
     def get_top_coins_by_volume(self, top_n: int, quote: str = "USDT") -> list[str]:
         """Devuelve los símbolos de las *top_n* monedas con mayor volumen 24 h en pares *quote*."""
+        if not self.is_connected:
+            raise ConnectionError("No hay conexión con Binance.")
         tickers = self._client.get_ticker()
         usdt_tickers = [
             t
@@ -107,6 +118,8 @@ class BinanceDataClient:
 
     def get_current_price(self, symbol: str) -> float:
         """Precio actual de un símbolo."""
+        if not self.is_connected:
+            raise ConnectionError("No hay conexión con Binance.")
         tick = self._client.get_symbol_ticker(symbol=symbol)
         return float(tick["price"])
 

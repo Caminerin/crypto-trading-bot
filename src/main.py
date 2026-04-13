@@ -17,6 +17,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import pandas as pd
+
 from src.config import MODELS_DIR, AppConfig, load_config
 from src.data.binance_client import BinanceDataClient, BinanceTradingClient
 from src.execution.executor import OrderExecutor
@@ -64,54 +66,102 @@ def run_daily(config: AppConfig | None = None) -> None:
         assert trading_client is not None
         portfolio_before = trading_client.get_portfolio()
         total_value_before = trading_client.get_portfolio_value_usdt()
-        logger.info("Cartera actual: %s | Valor: $%.2f", portfolio_before, total_value_before)
+        logger.info(
+            "Cartera actual: %s | Valor: $%.2f",
+            portfolio_before, total_value_before,
+        )
 
     # ------------------------------------------------------------------
     # 3. Obtener top monedas y descargar datos
     # ------------------------------------------------------------------
-    logger.info("Obteniendo top %d monedas por volumen...", config.model.top_n_coins)
-    top_symbols = data_client.get_top_coins_by_volume(config.model.top_n_coins)
-    logger.info("Top monedas obtenidas: %d", len(top_symbols))
+    top_symbols: list[str] = []
+    klines: dict[str, pd.DataFrame] = {}
 
-    logger.info("Descargando velas (%dh lookback)...", config.model.lookback_hours)
-    klines = data_client.get_klines_batch(
-        top_symbols,
-        interval=config.model.candle_interval,
-        lookback_hours=config.model.lookback_hours,
-    )
-    logger.info("Velas descargadas para %d monedas", len(klines))
+    try:
+        logger.info(
+            "Obteniendo top %d monedas por volumen...",
+            config.model.top_n_coins,
+        )
+        top_symbols = data_client.get_top_coins_by_volume(
+            config.model.top_n_coins,
+        )
+        logger.info("Top monedas obtenidas: %d", len(top_symbols))
+
+        logger.info(
+            "Descargando velas (%dh lookback)...",
+            config.model.lookback_hours,
+        )
+        klines = data_client.get_klines_batch(
+            top_symbols,
+            interval=config.model.candle_interval,
+            lookback_hours=config.model.lookback_hours,
+        )
+        logger.info("Velas descargadas para %d monedas", len(klines))
+    except Exception as exc:
+        logger.warning("Error obteniendo datos de Binance: %s", exc)
+        if not config.is_paper_trading:
+            raise
+        logger.info(
+            "[PAPER] Continuando sin datos reales (primera ejecución)"
+        )
 
     # ------------------------------------------------------------------
     # 4. Entrenar o cargar modelo
     # ------------------------------------------------------------------
-    if _should_retrain(config):
+    model_ready = False
+    if klines and _should_retrain(config):
         logger.info("Entrenando modelo con datos extendidos...")
-        training_klines = data_client.get_klines_batch(
-            top_symbols,
-            interval=config.model.candle_interval,
-            lookback_hours=config.model.training_days * 24,
-        )
-        metrics = predictor.train(training_klines)
-        predictor.save()
-        logger.info("Modelo entrenado — métricas: %s", metrics)
+        try:
+            training_klines = data_client.get_klines_batch(
+                top_symbols,
+                interval=config.model.candle_interval,
+                lookback_hours=config.model.training_days * 24,
+            )
+            metrics = predictor.train(training_klines)
+            predictor.save()
+            model_ready = True
+            logger.info("Modelo entrenado — métricas: %s", metrics)
+        except Exception as exc:
+            logger.warning("Error entrenando modelo: %s", exc)
+    elif MODEL_FILE.exists():
+        try:
+            logger.info("Cargando modelo existente...")
+            predictor.load()
+            model_ready = True
+        except Exception as exc:
+            logger.warning("Error cargando modelo: %s", exc)
     else:
-        logger.info("Cargando modelo existente...")
-        predictor.load()
+        logger.info(
+            "No hay modelo entrenado ni datos para entrenar. "
+            "Se necesita al menos una ejecución con conexión a Binance."
+        )
 
     # ------------------------------------------------------------------
     # 5. Predecir
     # ------------------------------------------------------------------
-    logger.info("Ejecutando predicciones...")
-    predictions = predictor.predict(klines)
-    recommendations = predictor.get_recommendations(predictions)
-    logger.info(
-        "Predicciones: %d monedas analizadas | %d recomendadas (umbral=%.0f%%)",
-        len(predictions),
-        len(recommendations),
-        config.model.confidence_threshold * 100,
-    )
-    for sym, prob in recommendations[:10]:
-        logger.info("  %s — prob=%.1f%%", sym, prob * 100)
+    predictions: dict[str, float] = {}
+    recommendations: list[tuple[str, float]] = []
+
+    if model_ready and klines:
+        logger.info("Ejecutando predicciones...")
+        predictions = predictor.predict(klines)
+        recommendations = predictor.get_recommendations(predictions)
+        logger.info(
+            "Predicciones: %d monedas analizadas "
+            "| %d recomendadas (umbral=%.0f%%)",
+            len(predictions),
+            len(recommendations),
+            config.model.confidence_threshold * 100,
+        )
+        for sym, prob in recommendations[:10]:
+            logger.info("  %s — prob=%.1f%%", sym, prob * 100)
+    else:
+        logger.info(
+            "Sin predicciones disponibles "
+            "(modelo=%s, datos=%d monedas)",
+            "listo" if model_ready else "no disponible",
+            len(klines),
+        )
 
     # ------------------------------------------------------------------
     # 6. Decidir acciones
@@ -138,7 +188,9 @@ def run_daily(config: AppConfig | None = None) -> None:
     # ------------------------------------------------------------------
     results = executor.execute(actions)
     successful = sum(1 for r in results if r.success)
-    logger.info("Órdenes ejecutadas: %d/%d exitosas", successful, len(results))
+    logger.info(
+        "Órdenes ejecutadas: %d/%d exitosas", successful, len(results),
+    )
 
     # ------------------------------------------------------------------
     # 8. Estado final de la cartera
@@ -183,12 +235,26 @@ def run_train_only(config: AppConfig | None = None) -> None:
     logger.info("Modo ENTRENAMIENTO — solo entrena el modelo, no opera")
 
     data_client = BinanceDataClient(config.binance)
+    if not data_client.is_connected:
+        logger.error(
+            "No se pudo conectar a Binance. "
+            "Verifica BINANCE_API_KEY y BINANCE_API_SECRET."
+        )
+        sys.exit(1)
+
     predictor = PricePredictor(config.model)
 
-    logger.info("Obteniendo top %d monedas...", config.model.top_n_coins)
-    top_symbols = data_client.get_top_coins_by_volume(config.model.top_n_coins)
+    logger.info(
+        "Obteniendo top %d monedas...", config.model.top_n_coins,
+    )
+    top_symbols = data_client.get_top_coins_by_volume(
+        config.model.top_n_coins,
+    )
 
-    logger.info("Descargando datos de entrenamiento (%d días)...", config.model.training_days)
+    logger.info(
+        "Descargando datos de entrenamiento (%d días)...",
+        config.model.training_days,
+    )
     training_klines = data_client.get_klines_batch(
         top_symbols,
         interval=config.model.candle_interval,
@@ -201,7 +267,9 @@ def run_train_only(config: AppConfig | None = None) -> None:
 
     # Mostrar importancia de features
     importance = predictor.feature_importance()
-    logger.info("Top 10 features:\n%s", importance.head(10).to_string())
+    logger.info(
+        "Top 10 features:\n%s", importance.head(10).to_string(),
+    )
 
 
 def _should_retrain(config: AppConfig) -> bool:
