@@ -1,0 +1,50 @@
+# Re-entrenamiento semanal del modelo (domingos a las 06:00 UTC).
+#
+# Se ejecuta 1 hora antes del trading diario para que el modelo
+# esté fresco cuando el bot opere a las 07:00.
+
+name: Weekly Model Retrain
+
+on:
+  schedule:
+    # Domingos a las 06:00 UTC
+    - cron: "0 6 * * 0"
+  workflow_dispatch:
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install .
+
+      - name: Train model
+        env:
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
+        run: python -m src.main train
+
+      - name: Save trained model
+        uses: actions/cache/save@v4
+        with:
+          path: models/
+          key: model-retrain-${{ github.run_number }}
+
+      - name: Upload training logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrain-logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 30

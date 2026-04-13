@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crypto-trading-bot"
+version = "0.1.0"
+description = "Bot de trading automático para Binance Spot con modelo predictivo ML"
+requires-python = ">=3.11"
+dependencies = [
+    "python-binance>=1.0.19",
+    "pandas>=2.1.0",
+    "numpy>=1.25.0",
+    "ta>=0.11.0",
+    "lightgbm>=4.1.0",
+    "scikit-learn>=1.3.0",
+    "sendgrid>=6.11.0",
+    "python-dotenv>=1.0.0",
+    "joblib>=1.3.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+    "mypy>=1.7.0",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+
+[project.scripts]
+crypto-bot = "src.main:main"
