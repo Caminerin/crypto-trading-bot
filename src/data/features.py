@@ -7,13 +7,13 @@ usa como entrada al modelo predictivo.
 
 Features incluidas:
 - Indicadores de tendencia (SMA, EMA, MACD)
-- Indicadores de momentum (RSI, Stochastic, ROC)
+- Indicadores de momentum (RSI, Stochastic, ROC, MFI)
 - Indicadores de volatilidad (Bollinger Bands, ATR)
 - Indicadores de volumen (OBV, VWAP, volumen relativo)
-- Features derivadas del precio
+- Features derivadas del precio y soporte/resistencia
 - Lag features a corto, medio y largo plazo
 - Features temporales (hora del dia, dia de la semana)
-- Features de BTC (correlacion, momentum del mercado)
+- Features de BTC (correlacion, momentum del mercado, dominancia)
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import ta
-
 
 # Minimo de filas necesarias para calcular todos los indicadores.
 # La ventana mas grande es roc_72 (necesita 73 filas).
@@ -57,6 +56,7 @@ def compute_features(
     df = _add_volatility_indicators(df)
     df = _add_volume_indicators(df)
     df = _add_price_change_features(df)
+    df = _add_support_resistance_features(df)
     df = _add_lag_features(df)
     df = _add_time_features(df)
     if btc_df is not None and len(btc_df) >= MIN_ROWS_FOR_FEATURES:
@@ -103,6 +103,11 @@ def _add_momentum_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["roc_3"] = df["close"].pct_change(periods=3)
     df["roc_7"] = df["close"].pct_change(periods=7)
     df["roc_24"] = df["close"].pct_change(periods=24)
+
+    # Money Flow Index (combina precio + volumen)
+    df["mfi_14"] = ta.volume.money_flow_index(
+        df["high"], df["low"], df["close"], df["volume"], window=14,
+    )
 
     return df
 
@@ -154,6 +159,41 @@ def _add_price_change_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df["higher_high"] = (df["high"] > df["high"].shift(1)).astype(int)
     df["lower_low"] = (df["low"] < df["low"].shift(1)).astype(int)
+
+    return df
+
+
+# ------------------------------------------------------------------
+# Soporte / Resistencia dinamico
+# ------------------------------------------------------------------
+
+def _add_support_resistance_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Distancia del precio actual a maximos/minimos recientes.
+
+    Usa ventanas de 24h y 72h (3 dias) para ser compatible con
+    el lookback de 120h usado en prediccion.
+    """
+    # Maximos y minimos rolling
+    high_24h = df["high"].rolling(window=24).max()
+    low_24h = df["low"].rolling(window=24).min()
+    high_72h = df["high"].rolling(window=72).max()
+    low_72h = df["low"].rolling(window=72).min()
+
+    # Distancia relativa al soporte/resistencia
+    df["dist_resistance_24h"] = (high_24h - df["close"]) / df["close"]
+    df["dist_support_24h"] = (df["close"] - low_24h) / df["close"]
+    df["dist_resistance_72h"] = (high_72h - df["close"]) / df["close"]
+    df["dist_support_72h"] = (df["close"] - low_72h) / df["close"]
+
+    # Posicion relativa dentro del rango (0=en minimo, 1=en maximo)
+    range_24h = high_24h - low_24h
+    df["range_position_24h"] = np.where(
+        range_24h > 0, (df["close"] - low_24h) / range_24h, 0.5,
+    )
+    range_72h = high_72h - low_72h
+    df["range_position_72h"] = np.where(
+        range_72h > 0, (df["close"] - low_72h) / range_72h, 0.5,
+    )
 
     return df
 
@@ -233,6 +273,17 @@ def _add_btc_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     # Correlacion moneda-BTC (rolling 24h)
     df["coin_btc_corr_24"] = df["close"].rolling(window=24).corr(btc_close)
 
+    # Dominancia BTC proxy: ratio de volatilidad BTC vs moneda
+    # Cuando BTC es menos volatil que altcoins, las altcoins tienden a moverse mas
+    coin_vol = df["close"].rolling(window=24).std() / df["close"].rolling(window=24).mean()
+    btc_vol = btc_close.rolling(window=24).std() / btc_close.rolling(window=24).mean()
+    df["btc_dominance_proxy"] = np.where(coin_vol > 0, btc_vol / coin_vol, 1.0)
+
+    # Performance relativa moneda vs BTC (rendimiento de la moneda menos el de BTC)
+    coin_ret_24 = df["close"].pct_change(periods=24)
+    btc_ret_24 = btc_close.pct_change(periods=24)
+    df["relative_perf_btc_24"] = coin_ret_24 - btc_ret_24
+
     return df
 
 
@@ -265,6 +316,12 @@ def get_feature_columns(include_btc: bool = True) -> list[str]:
         # Precio
         "high_low_pct", "close_open_pct",
         "higher_high", "lower_low",
+        # MFI
+        "mfi_14",
+        # Soporte / Resistencia
+        "dist_resistance_24h", "dist_support_24h",
+        "dist_resistance_72h", "dist_support_72h",
+        "range_position_24h", "range_position_72h",
         # Lags -- corto
         "roc_6",
         # Lags -- medio
@@ -286,6 +343,7 @@ def get_feature_columns(include_btc: bool = True) -> list[str]:
             "btc_roc_1", "btc_roc_6", "btc_roc_12", "btc_roc_24",
             "btc_rsi_14", "btc_volatility_24",
             "coin_btc_corr_24",
+            "btc_dominance_proxy", "relative_perf_btc_24",
         ])
 
     return base
