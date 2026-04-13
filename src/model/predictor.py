@@ -1,26 +1,31 @@
 """
 Modelo predictivo de subida de precio.
 
-Entrena un clasificador LightGBM para predecir si una moneda subira
-mas de un X% en las proximas N horas (configurable).  Expone metodos para:
+Entrena un ensemble de 3 clasificadores (LightGBM, XGBoost, Random Forest)
+que votan para predecir si una moneda subira mas de un X% en las proximas
+N horas (configurable).  La probabilidad final es la media de los 3 modelos.
 
+Expone metodos para:
 - Preparar datos de entrenamiento (labeling).
-- Entrenar y guardar el modelo.
-- Cargar un modelo guardado.
+- Entrenar y guardar el ensemble.
+- Cargar un ensemble guardado.
 - Predecir probabilidades sobre datos nuevos.
 
-Features incluyen indicadores tecnicos de la moneda, lags a corto/medio/largo
-plazo, features temporales y features de BTC como proxy del mercado.
+Features incluyen indicadores tecnicos, MFI, soporte/resistencia, lags,
+features temporales y features de BTC como proxy del mercado.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import joblib
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+import xgboost as xgb
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.metrics import classification_report, roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
@@ -48,12 +53,53 @@ def create_labels(df: pd.DataFrame, target_pct: float, horizon: int = 24) -> pd.
 # Clase principal
 # ------------------------------------------------------------------
 
+def _build_ensemble() -> VotingClassifier:
+    """Construye un VotingClassifier con LightGBM, XGBoost y Random Forest."""
+    lgbm = lgb.LGBMClassifier(
+        n_estimators=300,
+        learning_rate=0.05,
+        max_depth=6,
+        num_leaves=31,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        class_weight="balanced",
+        random_state=42,
+        verbose=-1,
+    )
+    xgb_clf = xgb.XGBClassifier(
+        n_estimators=300,
+        learning_rate=0.05,
+        max_depth=6,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        scale_pos_weight=1,  # se ajusta dinamicamente en train()
+        random_state=42,
+        eval_metric="logloss",
+        verbosity=0,
+    )
+    rf = RandomForestClassifier(
+        n_estimators=300,
+        max_depth=10,
+        min_samples_leaf=20,
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1,
+    )
+    return VotingClassifier(
+        estimators=[("lgbm", lgbm), ("xgb", xgb_clf), ("rf", rf)],
+        voting="soft",  # promedia probabilidades en vez de votos duros
+    )
+
+
 class PricePredictor:
-    """Clasificador binario para predicción de subida de precio."""
+    """Ensemble de 3 modelos (LightGBM + XGBoost + Random Forest) para
+    prediccion de subida de precio.  Usa voting suave (promedio de
+    probabilidades)."""
 
     def __init__(self, config: ModelConfig) -> None:
         self._config = config
-        self._model: lgb.LGBMClassifier | None = None
+        self._model: VotingClassifier | None = None
         self._feature_cols = get_feature_columns(include_btc=True)
 
     # ------------------------------------------------------------------
@@ -108,60 +154,56 @@ class PricePredictor:
             100 * y.mean(),
         )
 
+        # Ajustar scale_pos_weight de XGBoost al ratio real
+        neg_count = int((y == 0).sum())
+        pos_count = int((y == 1).sum())
+        spw = neg_count / max(pos_count, 1)
+
         # Time series split para evaluación
         tscv = TimeSeriesSplit(n_splits=3)
         auc_scores: list[float] = []
+        per_model_auc: dict[str, list[float]] = {
+            "lgbm": [], "xgb": [], "rf": [],
+        }
 
         for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
             X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
             y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
-            model = lgb.LGBMClassifier(
-                n_estimators=300,
-                learning_rate=0.05,
-                max_depth=6,
-                num_leaves=31,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                min_child_samples=20,
-                class_weight="balanced",
-                random_state=42,
-                verbose=-1,
-            )
-            model.fit(
-                X_train,
-                y_train,
-                eval_set=[(X_val, y_val)],
-                callbacks=[lgb.early_stopping(30, verbose=False)],
-            )
+            ensemble = _build_ensemble()
+            # Ajustar XGBoost scale_pos_weight
+            ensemble.named_estimators["xgb"].set_params(scale_pos_weight=spw)
+            ensemble.fit(X_train, y_train)
 
-            y_prob = model.predict_proba(X_val)[:, 1]
+            # AUC del ensemble
+            y_prob = ensemble.predict_proba(X_val)[:, 1]
             auc = roc_auc_score(y_val, y_prob)
             auc_scores.append(auc)
-            logger.info("Fold %d — AUC: %.4f", fold, auc)
+            logger.info("Fold %d — Ensemble AUC: %.4f", fold, auc)
+
+            # AUC por modelo individual
+            for name, estimator in ensemble.named_estimators_.items():
+                y_prob_i = estimator.predict_proba(X_val)[:, 1]
+                auc_i = roc_auc_score(y_val, y_prob_i)
+                per_model_auc[name].append(auc_i)
+                logger.info("  Fold %d — %s AUC: %.4f", fold, name, auc_i)
+
+        # Log de AUC medio por modelo
+        for name, scores in per_model_auc.items():
+            logger.info("%s AUC medio: %.4f", name, np.mean(scores))
 
         # Entrenamiento final con todos los datos
-        self._model = lgb.LGBMClassifier(
-            n_estimators=300,
-            learning_rate=0.05,
-            max_depth=6,
-            num_leaves=31,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            min_child_samples=20,
-            class_weight="balanced",
-            random_state=42,
-            verbose=-1,
-        )
+        self._model = _build_ensemble()
+        self._model.named_estimators["xgb"].set_params(scale_pos_weight=spw)
         self._model.fit(X, y)
 
         # Reporte
         y_pred = self._model.predict(X)
         report = classification_report(y, y_pred, output_dict=True)
-        logger.info("Reporte final:\n%s", classification_report(y, y_pred))
+        logger.info("Reporte final (ensemble):\n%s", classification_report(y, y_pred))
 
         mean_auc = float(np.mean(auc_scores))
-        metrics = {
+        metrics: dict[str, Any] = {
             "mean_auc": mean_auc,
             "accuracy": report["accuracy"],
             "precision_1": report["1"]["precision"],
@@ -170,7 +212,11 @@ class PricePredictor:
             "samples": len(X),
             "positive_rate": float(y.mean()),
         }
-        logger.info("AUC medio CV: %.4f", mean_auc)
+        # Incluir AUC por modelo individual
+        for name, scores in per_model_auc.items():
+            metrics[f"auc_{name}"] = float(np.mean(scores))
+
+        logger.info("Ensemble AUC medio CV: %.4f", mean_auc)
         return metrics
 
     # ------------------------------------------------------------------
@@ -196,6 +242,7 @@ class PricePredictor:
                 if featured.empty:
                     continue
                 last_row = featured[self._feature_cols].iloc[[-1]]
+                # predict_proba del VotingClassifier promedia las probabilidades
                 prob = self._model.predict_proba(last_row)[0, 1]
                 predictions[symbol] = float(prob)
             except Exception as exc:
@@ -222,33 +269,46 @@ class PricePredictor:
     # ------------------------------------------------------------------
 
     def save(self, path: Path | None = None) -> Path:
-        """Guarda el modelo entrenado en disco."""
+        """Guarda el ensemble entrenado en disco."""
         save_path = path or MODEL_FILE
         if self._model is None:
             raise RuntimeError("No hay modelo para guardar.")
         joblib.dump(self._model, save_path)
-        logger.info("Modelo guardado en %s", save_path)
+        logger.info("Ensemble guardado en %s", save_path)
         return save_path
 
     def load(self, path: Path | None = None) -> None:
-        """Carga un modelo guardado desde disco."""
+        """Carga un ensemble guardado desde disco."""
         load_path = path or MODEL_FILE
         if not load_path.exists():
             raise FileNotFoundError(f"No se encontró el modelo en {load_path}")
         self._model = joblib.load(load_path)
-        logger.info("Modelo cargado desde %s", load_path)
+        logger.info("Ensemble cargado desde %s", load_path)
 
     @property
     def is_trained(self) -> bool:
         return self._model is not None
 
     def feature_importance(self) -> pd.DataFrame:
-        """Devuelve importancia de cada feature (útil para debugging)."""
+        """Devuelve importancia media de cada feature (promediada entre modelos).
+
+        LightGBM y XGBoost exponen feature_importances_ directamente.
+        Random Forest tambien.  Promediamos las tres (normalizadas).
+        """
         if self._model is None:
             raise RuntimeError("Modelo no entrenado.")
-        importance = self._model.feature_importances_
+
+        importances: list[np.ndarray] = []
+        for _name, estimator in self._model.named_estimators_.items():
+            imp = np.array(estimator.feature_importances_, dtype=float)
+            total = imp.sum()
+            if total > 0:
+                imp = imp / total  # normalizar a [0, 1]
+            importances.append(imp)
+
+        avg_importance = np.mean(importances, axis=0)
         return (
-            pd.DataFrame({"feature": self._feature_cols, "importance": importance})
+            pd.DataFrame({"feature": self._feature_cols, "importance": avg_importance})
             .sort_values("importance", ascending=False)
             .reset_index(drop=True)
         )
