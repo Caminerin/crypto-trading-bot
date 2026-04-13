@@ -7,10 +7,17 @@ Responsabilidades:
 - Consultar balances de la cartera.
 - Ejecutar órdenes de mercado (market orders).
 - Colocar órdenes OCO (stop-loss + take-profit).
+
+Estrategia de conexión (para datos de mercado):
+1. Intenta usar python-binance Client (api.binance.com, etc.)
+2. Si falla (geo-bloqueo 451 desde GitHub Actions / US), usa
+   peticiones HTTP directas a data-api.binance.vision (API pública
+   sin geo-restricción).
 """
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -25,98 +32,166 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-# Endpoints alternativos de Binance (por si el principal falla).
-# data-api.binance.vision va primero porque no tiene geo-bloqueo
-# (api.binance.com devuelve 451 desde IPs de GitHub Actions / US).
-_BINANCE_ENDPOINTS = [
-    "https://data-api.binance.vision/api",
+# Endpoints para python-binance Client (requiere que no haya geo-bloqueo).
+_CLIENT_ENDPOINTS = [
     "https://api.binance.com/api",
     "https://api1.binance.com/api",
     "https://api2.binance.com/api",
     "https://api3.binance.com/api",
 ]
 
+# Endpoints para HTTP directo (fallback cuando Client falla por geo-bloqueo).
+_HTTP_BASE_URLS = [
+    "https://data-api.binance.vision",
+    "https://api.binance.com",
+    "https://api1.binance.com",
+]
 
-def _find_working_endpoint(timeout: int = 10) -> str | None:
-    """Prueba endpoints de Binance y devuelve el primero que responda."""
-    for endpoint in _BINANCE_ENDPOINTS:
+_KLINE_COLUMNS = [
+    "open_time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "close_time",
+    "quote_volume",
+    "trades",
+    "taker_buy_base",
+    "taker_buy_quote",
+    "ignore",
+]
+
+_NUMERIC_COLS = ["open", "high", "low", "close", "volume", "quote_volume"]
+
+
+def _find_working_client_endpoint(timeout: int = 10) -> str | None:
+    """Prueba endpoints de python-binance y devuelve el primero que responda."""
+    for endpoint in _CLIENT_ENDPOINTS:
         try:
             resp = _requests.get(f"{endpoint}/v3/ping", timeout=timeout)
             if resp.status_code == 200:
-                logger.info("Endpoint accesible: %s", endpoint)
+                logger.info("Client endpoint accesible: %s", endpoint)
                 return endpoint
         except Exception as exc:
-            logger.debug("Endpoint %s no accesible: %s", endpoint, exc)
+            logger.debug("Client endpoint %s no accesible: %s", endpoint, exc)
     return None
 
 
+def _find_working_http_base(timeout: int = 10) -> str | None:
+    """Prueba base URLs para HTTP directo y devuelve el primero que responda."""
+    for base_url in _HTTP_BASE_URLS:
+        try:
+            resp = _requests.get(
+                f"{base_url}/api/v3/ping",
+                timeout=timeout,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            if resp.status_code == 200:
+                logger.info("HTTP base URL accesible: %s", base_url)
+                return base_url
+        except Exception as exc:
+            logger.debug("HTTP base %s no accesible: %s", base_url, exc)
+    return None
+
+
+def _klines_to_dataframe(raw: list[list[Any]]) -> pd.DataFrame:
+    """Convierte la respuesta cruda de klines en un DataFrame limpio."""
+    df = pd.DataFrame(raw, columns=_KLINE_COLUMNS)
+    df[_NUMERIC_COLS] = df[_NUMERIC_COLS].astype(float)
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+    df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
+    df = df.set_index("open_time")
+    return df
+
+
 class BinanceDataClient:
-    """Lectura de datos de mercado desde Binance."""
+    """Lectura de datos de mercado desde Binance.
+
+    Usa python-binance Client si es posible; si no, hace HTTP directo
+    a la API pública de Binance (data-api.binance.vision).
+    """
 
     def __init__(self, config: BinanceConfig) -> None:
         self._client: Client | None = None
+        self._http_base: str | None = None
 
-        # 1. Comprobar conectividad con Binance antes de crear el Client.
-        working_endpoint = _find_working_endpoint()
-        if working_endpoint is None:
-            logger.warning(
-                "No se pudo conectar a ningun endpoint de Binance. "
-                "Posible problema de red."
+        # 1. Intentar crear python-binance Client (mejor experiencia).
+        client_endpoint = _find_working_client_endpoint()
+        if client_endpoint is not None:
+            for label, key, secret in [
+                ("auth", config.api_key, config.api_secret),
+                ("public", "", ""),
+            ]:
+                try:
+                    client = Client(key, secret, {"timeout": 20})
+                    client.API_URL = client_endpoint
+                    client.ping()
+                    self._client = client
+                    logger.info(
+                        "Conectado a Binance via Client (%s) en %s",
+                        label,
+                        client_endpoint,
+                    )
+                    return
+                except Exception as exc:
+                    logger.warning(
+                        "Client(%s) fallo: %s: %s",
+                        label,
+                        type(exc).__name__,
+                        exc,
+                    )
+
+        # 2. Fallback: HTTP directo (funciona desde GitHub Actions / US).
+        self._http_base = _find_working_http_base()
+        if self._http_base is not None:
+            logger.info(
+                "Conectado a Binance via HTTP directo en %s",
+                self._http_base,
             )
             return
 
-        # 2. Crear el Client. El constructor de python-binance hace ping
-        #    al endpoint por defecto; si falla, capturamos y reintentamos
-        #    sin credenciales (API publica — suficiente para datos de mercado).
-        api_key = config.api_key
-        api_secret = config.api_secret
-
-        for label, key, secret in [
-            ("auth", api_key, api_secret),
-            ("public", "", ""),
-        ]:
-            try:
-                client = Client(key, secret, {"timeout": 20})
-                # Asegurar que usamos el endpoint que ya sabemos que funciona.
-                client.API_URL = working_endpoint
-                client.ping()
-                self._client = client
-                logger.info(
-                    "Conectado a Binance (%s) via %s",
-                    label,
-                    working_endpoint,
-                )
-                return
-            except Exception as exc:
-                logger.warning(
-                    "Client(%s) fallo: %s: %s",
-                    label,
-                    type(exc).__name__,
-                    exc,
-                )
-
-        logger.error("No se pudo crear un Client de Binance funcional.")
+        logger.error(
+            "No se pudo conectar a Binance por ningún método "
+            "(Client ni HTTP directo)."
+        )
 
     @property
     def is_connected(self) -> bool:
         """Indica si la conexión con Binance está activa."""
-        return self._client is not None
+        return self._client is not None or self._http_base is not None
 
-    def _ensure_connected(self) -> Client:
-        """Devuelve el cliente o lanza ConnectionError."""
-        if self._client is None:
-            raise ConnectionError("No hay conexión con Binance.")
-        return self._client
+    @property
+    def _uses_http(self) -> bool:
+        """True si estamos usando HTTP directo en vez de Client."""
+        return self._client is None and self._http_base is not None
+
+    def _http_get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        """GET a la API REST de Binance vía HTTP directo."""
+        url = f"{self._http_base}/api/v3/{path}"
+        resp = _requests.get(
+            url,
+            params=params,
+            timeout=30,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     # ------------------------------------------------------------------
     # Datos de mercado
     # ------------------------------------------------------------------
 
     def get_top_coins_by_volume(self, top_n: int, quote: str = "USDT") -> list[str]:
-        """Devuelve los símbolos de las *top_n* monedas con mayor volumen 24 h en pares *quote*."""
+        """Devuelve los símbolos de las *top_n* monedas con mayor volumen 24 h."""
         if not self.is_connected:
             raise ConnectionError("No hay conexión con Binance.")
-        tickers = self._client.get_ticker()
+
+        if self._uses_http:
+            tickers = self._http_get("ticker/24hr")
+        else:
+            tickers = self._client.get_ticker()
+
         usdt_tickers = [
             t
             for t in tickers
@@ -138,37 +213,39 @@ class BinanceDataClient:
         start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
         start_ms = int(start_time.timestamp() * 1000)
 
-        raw = self._client.get_klines(
-            symbol=symbol,
-            interval=interval,
-            startTime=start_ms,
-            limit=1000,
-        )
+        if self._uses_http:
+            all_raw: list[list[Any]] = []
+            current_start = start_ms
+            while True:
+                raw = self._http_get(
+                    "klines",
+                    {
+                        "symbol": symbol,
+                        "interval": interval,
+                        "startTime": current_start,
+                        "limit": 1000,
+                    },
+                )
+                if not raw:
+                    break
+                all_raw.extend(raw)
+                if len(raw) < 1000:
+                    break
+                current_start = raw[-1][0] + 1
+                time.sleep(0.1)
+            raw = all_raw
+        else:
+            raw = self._client.get_klines(
+                symbol=symbol,
+                interval=interval,
+                startTime=start_ms,
+                limit=1000,
+            )
 
-        df = pd.DataFrame(
-            raw,
-            columns=[
-                "open_time",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "close_time",
-                "quote_volume",
-                "trades",
-                "taker_buy_base",
-                "taker_buy_quote",
-                "ignore",
-            ],
-        )
+        if not raw:
+            return pd.DataFrame(columns=_KLINE_COLUMNS).set_index("open_time")
 
-        numeric_cols = ["open", "high", "low", "close", "volume", "quote_volume"]
-        df[numeric_cols] = df[numeric_cols].astype(float)
-        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-        df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
-        df = df.set_index("open_time")
-        return df
+        return _klines_to_dataframe(raw)
 
     def get_klines_batch(
         self,
@@ -178,10 +255,12 @@ class BinanceDataClient:
     ) -> dict[str, pd.DataFrame]:
         """Descarga velas para múltiples símbolos."""
         result: dict[str, pd.DataFrame] = {}
-        for symbol in symbols:
+        for i, symbol in enumerate(symbols):
             try:
                 result[symbol] = self.get_klines(symbol, interval, lookback_hours)
-            except BinanceAPIException as exc:
+                if self._uses_http and i % 50 == 49:
+                    logger.info("  Descargadas %d/%d monedas...", i + 1, len(symbols))
+            except (BinanceAPIException, _requests.RequestException) as exc:
                 logger.warning("No se pudieron obtener klines de %s: %s", symbol, exc)
         return result
 
@@ -189,6 +268,11 @@ class BinanceDataClient:
         """Precio actual de un símbolo."""
         if not self.is_connected:
             raise ConnectionError("No hay conexión con Binance.")
+
+        if self._uses_http:
+            data = self._http_get("ticker/price", {"symbol": symbol})
+            return float(data["price"])
+
         tick = self._client.get_symbol_ticker(symbol=symbol)
         return float(tick["price"])
 
