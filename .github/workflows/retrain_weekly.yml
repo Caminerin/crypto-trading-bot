@@ -29,30 +29,41 @@ jobs:
       - name: Install dependencies
         run: pip install .
 
-      - name: Test Binance connectivity
+      - name: Test data source connectivity
+        continue-on-error: true
         run: |
           python3 << 'PYEOF'
-          import requests, sys
-          endpoints = [
-              "https://api.binance.com/api/v3/ping",
-              "https://api1.binance.com/api/v3/ping",
-              "https://api2.binance.com/api/v3/ping",
-              "https://api3.binance.com/api/v3/ping",
-          ]
-          ok = False
-          for url in endpoints:
+          import requests, json
+
+          sources = {
+              "Binance API": "https://api.binance.com/api/v3/ping",
+              "Binance API1": "https://api1.binance.com/api/v3/ping",
+              "Binance Data": "https://data-api.binance.vision/api/v3/ping",
+              "CryptoCompare": "https://min-api.cryptocompare.com/data/v2/histohour?fsym=BTC&tsym=USD&limit=1",
+              "CoinGecko": "https://api.coingecko.com/api/v3/ping",
+              "Yahoo Finance": "https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD?interval=1h&range=1d",
+              "Binance Vision CSV": "https://data.binance.vision/data/spot/daily/klines/BTCUSDT/1h/BTCUSDT-1h-2026-04-01.zip",
+              "Google": "https://www.google.com",
+              "PyPI": "https://pypi.org/simple/",
+          }
+
+          results = {}
+          for name, url in sources.items():
               try:
-                  r = requests.get(url, timeout=10)
-                  print(f"{url} -> status={r.status_code}")
-                  if r.status_code == 200:
-                      ok = True
+                  r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+                  status = f"OK (status={r.status_code}, size={len(r.content)})"
+                  results[name] = True
               except Exception as e:
-                  print(f"{url} -> ERROR: {type(e).__name__}: {e}")
-          if not ok:
-              print("WARN: Ningun endpoint de Binance accesible")
-              sys.exit(1)
-          print("OK: Al menos un endpoint accesible")
+                  status = f"FAIL: {type(e).__name__}: {e}"
+                  results[name] = False
+              print(f"  {name}: {status}")
+
+          working = [k for k, v in results.items() if v]
+          print(f"\nWorking sources: {working or 'NONE'}")
           PYEOF
+
+      - name: Install yfinance fallback
+        run: pip install yfinance
 
       - name: Train model
         env:
