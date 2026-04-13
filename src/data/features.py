@@ -13,12 +13,22 @@ import pandas as pd
 import ta
 
 
+# Mínimo de filas necesarias para calcular todos los indicadores.
+# La ventana más grande es SMA(50), así que necesitamos al menos 51 filas.
+MIN_ROWS_FOR_FEATURES = 51
+
+
 def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     """Calcula todas las features técnicas sobre un DataFrame de klines.
 
     Requiere columnas: open, high, low, close, volume.
     Devuelve una copia con las features añadidas y sin filas NaN.
+    Si el DataFrame tiene menos de MIN_ROWS_FOR_FEATURES filas,
+    devuelve un DataFrame vacío (no hay suficientes datos para los indicadores).
     """
+    if len(df) < MIN_ROWS_FOR_FEATURES:
+        return df.iloc[0:0].copy()
+
     df = df.copy()
 
     df = _add_trend_indicators(df)
