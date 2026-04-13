@@ -29,11 +29,36 @@ jobs:
       - name: Install dependencies
         run: pip install .
 
+      - name: Test Binance connectivity
+        run: |
+          python3 -c "
+import requests, sys
+endpoints = [
+    'https://api.binance.com/api/v3/ping',
+    'https://api1.binance.com/api/v3/ping',
+    'https://api2.binance.com/api/v3/ping',
+    'https://api3.binance.com/api/v3/ping',
+]
+ok = False
+for url in endpoints:
+    try:
+        r = requests.get(url, timeout=10)
+        print(f'{url} -> status={r.status_code}')
+        if r.status_code == 200:
+            ok = True
+    except Exception as e:
+        print(f'{url} -> ERROR: {type(e).__name__}: {e}')
+if not ok:
+    print('WARN: Ningun endpoint de Binance accesible')
+    sys.exit(1)
+print('OK: Al menos un endpoint accesible')
+"
+
       - name: Train model
         env:
           BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
           BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
-        run: python -m src.main train
+        run: python -m src.main train 2>&1 | tee training_output.txt
 
       - name: Save trained model
         uses: actions/cache/save@v4
