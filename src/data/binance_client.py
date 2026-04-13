@@ -26,7 +26,10 @@ logger = get_logger(__name__)
 
 
 # Endpoints alternativos de Binance (por si el principal falla).
+# data-api.binance.vision va primero porque no tiene geo-bloqueo
+# (api.binance.com devuelve 451 desde IPs de GitHub Actions / US).
 _BINANCE_ENDPOINTS = [
+    "https://data-api.binance.vision/api",
     "https://api.binance.com/api",
     "https://api1.binance.com/api",
     "https://api2.binance.com/api",
