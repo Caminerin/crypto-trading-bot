@@ -46,10 +46,19 @@ def run_daily(config: AppConfig | None = None) -> None:
     data_client = BinanceDataClient(config.binance)
 
     trading_client: BinanceTradingClient | None = None
-    if not config.is_paper_trading:
-        trading_client = BinanceTradingClient(
-            config.binance, config.portfolio, config.risk
-        )
+    is_paper = config.is_paper_trading
+
+    if not is_paper:
+        try:
+            trading_client = BinanceTradingClient(
+                config.binance, config.portfolio, config.risk
+            )
+        except Exception as exc:
+            logger.warning(
+                "No se pudo crear BinanceTradingClient: %s. "
+                "Cayendo a modo paper.", exc,
+            )
+            is_paper = True
 
     executor = OrderExecutor(config, trading_client)
     portfolio_mgr = PortfolioManager(config.portfolio, config.risk)
@@ -58,18 +67,29 @@ def run_daily(config: AppConfig | None = None) -> None:
     # ------------------------------------------------------------------
     # 2. Obtener estado actual de la cartera
     # ------------------------------------------------------------------
-    if config.is_paper_trading:
+    if is_paper:
         portfolio_before: dict[str, float] = {"USDT": 1000.0}
         total_value_before = 1000.0
         logger.info("[PAPER] Cartera simulada: 1000 USDT")
     else:
         assert trading_client is not None
-        portfolio_before = trading_client.get_portfolio()
-        total_value_before = trading_client.get_portfolio_value_usdt()
-        logger.info(
-            "Cartera actual: %s | Valor: $%.2f",
-            portfolio_before, total_value_before,
-        )
+        try:
+            portfolio_before = trading_client.get_portfolio()
+            total_value_before = trading_client.get_portfolio_value_usdt()
+            logger.info(
+                "Cartera actual: %s | Valor: $%.2f",
+                portfolio_before, total_value_before,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Error conectando con Binance para leer cartera: %s. "
+                "Cayendo a modo paper.", exc,
+            )
+            is_paper = True
+            trading_client = None
+            executor = OrderExecutor(config, None)
+            portfolio_before = {"USDT": 1000.0}
+            total_value_before = 1000.0
 
     # ------------------------------------------------------------------
     # 3. Obtener top monedas y descargar datos
@@ -99,7 +119,7 @@ def run_daily(config: AppConfig | None = None) -> None:
         logger.info("Velas descargadas para %d monedas", len(klines))
     except Exception as exc:
         logger.warning("Error obteniendo datos de Binance: %s", exc)
-        if not config.is_paper_trading:
+        if not is_paper:
             raise
         logger.info(
             "[PAPER] Continuando sin datos reales (primera ejecución)"
@@ -195,7 +215,7 @@ def run_daily(config: AppConfig | None = None) -> None:
     # ------------------------------------------------------------------
     # 8. Estado final de la cartera
     # ------------------------------------------------------------------
-    if config.is_paper_trading:
+    if is_paper:
         portfolio_after = portfolio_before.copy()
         total_value_after = total_value_before
     else:
@@ -217,7 +237,7 @@ def run_daily(config: AppConfig | None = None) -> None:
         total_value_after=total_value_after,
         results=results,
         predictions=predictions,
-        is_paper=config.is_paper_trading,
+        is_paper=is_paper,
     )
     if email_sent:
         logger.info("Reporte enviado por email")
