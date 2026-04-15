@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+
+{% block title %}Inicio — Bot de Trading{% endblock %}
+
+{% block content %}
+<h1>Panel de Control</h1>
+
+<!-- Estadísticas principales -->
+<div class="stat-grid">
+    <div class="stat-box">
+        <div class="value">${{ total_value }}</div>
+        <div class="label">Valor total (USDT)</div>
+    </div>
+    <div class="stat-box">
+        <div class="value">{{ n_positions }}</div>
+        <div class="label">Posiciones DCA abiertas</div>
+    </div>
+    <div class="stat-box">
+        <div class="value">{{ "Sí" if model_ready else "No" }}</div>
+        <div class="label">Modelo entrenado</div>
+    </div>
+</div>
+
+<!-- Estado del bot -->
+<div class="card">
+    <h3>Estado del Bot</h3>
+    <table>
+        <tbody>
+            <tr>
+                <td><strong>Última ejecución</strong></td>
+                <td>{{ last_exec }}</td>
+            </tr>
+            <tr>
+                <td><strong>Próxima ejecución</strong></td>
+                <td>{{ next_exec }}</td>
+            </tr>
+            <tr>
+                <td><strong>Modelo ML</strong></td>
+                <td>
+                    {% if model_ready %}
+                        Entrenado ({{ model_time }})
+                    {% else %}
+                        No disponible — se entrenará en la próxima ejecución
+                    {% endif %}
+                </td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- Asignación de estrategias -->
+<div class="card">
+    <h3>Asignación de Estrategias</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Estrategia</th>
+                <th>Porcentaje</th>
+                <th>Presupuesto (USDT)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>Predicción ML</td>
+                <td>{{ (alloc_config.prediction_pct * 100) | int }}%</td>
+                <td>${{ wallets.get("prediction", 0) | round(2) }}</td>
+            </tr>
+            <tr>
+                <td>DCA Inteligente</td>
+                <td>{{ (alloc_config.dca_pct * 100) | int }}%</td>
+                <td>${{ wallets.get("dca", 0) | round(2) }}</td>
+            </tr>
+            <tr>
+                <td>Reserva</td>
+                <td>{{ (alloc_config.reserve_pct * 100) | int }}%</td>
+                <td>${{ wallets.get("reserve", 0) | round(2) }}</td>
+            </tr>
+        </tbody>
+    </table>
+    {% if not wallets %}
+    <p><small class="neutral">Sin datos de asignación todavía. El bot creará la asignación en su primera ejecución.</small></p>
+    {% endif %}
+</div>
+
+<!-- Reportes recientes -->
+{% if reports %}
+<div class="card">
+    <h3>Reportes Recientes</h3>
+    <ul>
+        {% for r in reports %}
+        <li>{{ r.date }} — <code>{{ r.filename }}</code></li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+{% endblock %}
