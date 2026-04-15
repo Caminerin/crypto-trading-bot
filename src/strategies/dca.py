@@ -1,8 +1,7 @@
-"""
-Estrategia DCA Inteligente (Dollar Cost Averaging).
+"""Estrategia DCA Inteligente (Dollar Cost Averaging).
 
-Compra BTC y ETH solo cuando caen fuerte (>5% en 24h).
-Vende automaticamente cuando sube un 15% desde el precio de compra.
+Compra BTC, ETH y BNB cuando caen fuerte (umbral por moneda).
+Vende automaticamente al take-profit o stop-loss (por moneda).
 El dinero rota: compra barato -> vende caro -> repite.
 
 Posiciones se persisten en data/dca_positions.json.
@@ -16,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.config import DEFAULT_ASSET_POLICIES, DCAAssetPolicy
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -25,11 +25,12 @@ DATA_DIR.mkdir(exist_ok=True)
 DCA_POSITIONS_FILE = DATA_DIR / "dca_positions.json"
 
 # Monedas objetivo para DCA
-DCA_ASSETS = ["BTCUSDT", "ETHUSDT"]
+DCA_ASSETS = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
 
-# Umbrales
+# Umbrales globales (fallback — se usan si no hay politica por moneda)
 DIP_THRESHOLD = -0.05       # Comprar cuando cae mas del 5% en 24h
 TAKE_PROFIT_PCT = 0.15      # Vender cuando sube 15% desde precio de compra
+STOP_LOSS_PCT = -0.10       # Vender si cae 10% desde precio de compra
 MIN_ORDER_USDT = 10.0       # Minimo por orden en Binance
 
 
@@ -83,21 +84,35 @@ class DCAPosition:
 
 
 class DCAStrategy:
-    """Estrategia DCA Inteligente para BTC y ETH."""
+    """Estrategia DCA Inteligente con politica por moneda."""
 
     def __init__(
         self,
         budget_usdt: float,
         dip_threshold: float = DIP_THRESHOLD,
         take_profit_pct: float = TAKE_PROFIT_PCT,
+        stop_loss_pct: float = STOP_LOSS_PCT,
         assets: list[str] | None = None,
+        asset_policies: dict[str, DCAAssetPolicy] | None = None,
     ) -> None:
         self._budget = budget_usdt
         self._dip_threshold = dip_threshold
         self._take_profit_pct = take_profit_pct
+        self._stop_loss_pct = stop_loss_pct
         self._assets = assets or DCA_ASSETS.copy()
+        self._policies = asset_policies or DEFAULT_ASSET_POLICIES
         self._positions: list[DCAPosition] = []
         self._load_positions()
+
+    def _get_policy(self, symbol: str) -> DCAAssetPolicy:
+        """Devuelve la politica para un symbol, o la global por defecto."""
+        if symbol in self._policies:
+            return self._policies[symbol]
+        return DCAAssetPolicy(
+            dip_threshold=self._dip_threshold,
+            take_profit_pct=self._take_profit_pct,
+            stop_loss_pct=self._stop_loss_pct,
+        )
 
     # ------------------------------------------------------------------
     # Persistencia de posiciones
@@ -151,26 +166,29 @@ class DCAStrategy:
         """
         actions: list[DCAAction] = []
 
-        # 1. Revisar posiciones existentes -> SELL si take-profit
-        actions.extend(self._check_take_profits(current_prices))
+        # 1. Revisar posiciones existentes -> SELL si take-profit o stop-loss
+        actions.extend(self._check_exits(current_prices))
 
         # 2. Revisar si hay dips para comprar -> BUY
         actions.extend(self._check_dip_buys(price_changes_24h, current_prices))
 
         return actions
 
-    def _check_take_profits(
+    def _check_exits(
         self, current_prices: dict[str, float],
     ) -> list[DCAAction]:
-        """Genera SELL para posiciones con beneficio >= take_profit_pct."""
+        """Genera SELL para posiciones con take-profit o stop-loss."""
         sells: list[DCAAction] = []
         for pos in self._positions:
             price = current_prices.get(pos.symbol)
             if price is None:
                 continue
 
+            policy = self._get_policy(pos.symbol)
             pnl_pct = (price - pos.entry_price) / pos.entry_price
-            if pnl_pct >= self._take_profit_pct:
+
+            # Take-profit
+            if pnl_pct >= policy.take_profit_pct:
                 profit_usdt = pos.invested_usdt * pnl_pct
                 sells.append(
                     DCAAction(
@@ -187,7 +205,28 @@ class DCAStrategy:
                     )
                 )
                 logger.info(
-                    "DCA SELL %s: +%.1f%% (entrada=$%.2f, actual=$%.2f)",
+                    "DCA TP %s: +%.1f%% (entrada=$%.2f, actual=$%.2f)",
+                    pos.symbol, pnl_pct * 100, pos.entry_price, price,
+                )
+            # Stop-loss
+            elif pnl_pct <= policy.stop_loss_pct:
+                loss_usdt = pos.invested_usdt * pnl_pct
+                sells.append(
+                    DCAAction(
+                        action="SELL",
+                        symbol=pos.symbol,
+                        quote_qty=0,
+                        base_qty=pos.quantity,
+                        reason=(
+                            f"DCA stop-loss: {pos.symbol} "
+                            f"{pnl_pct:.1%} (entrada: ${pos.entry_price:,.2f}, "
+                            f"actual: ${price:,.2f}, perdida: ${loss_usdt:,.2f})"
+                        ),
+                        entry_price=pos.entry_price,
+                    )
+                )
+                logger.info(
+                    "DCA SL %s: %.1f%% (entrada=$%.2f, actual=$%.2f)",
                     pos.symbol, pnl_pct * 100, pos.entry_price, price,
                 )
         return sells
@@ -211,17 +250,19 @@ class DCAStrategy:
             )
             return buys
 
-        # Buscar dips en los activos DCA
+        # Buscar dips en los activos DCA (umbral por moneda)
         dip_assets: list[tuple[str, float]] = []
         for symbol in self._assets:
             change = price_changes_24h.get(symbol)
-            if change is not None and change <= self._dip_threshold:
+            if change is None:
+                continue
+            policy = self._get_policy(symbol)
+            if change <= policy.dip_threshold:
                 dip_assets.append((symbol, change))
 
         if not dip_assets:
             logger.info(
-                "DCA: sin caidas significativas hoy (umbral=%.0f%%)",
-                self._dip_threshold * 100,
+                "DCA: sin caidas significativas hoy (umbrales por moneda)",
             )
             return buys
 

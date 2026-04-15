@@ -57,13 +57,44 @@ class RiskConfig:
 
 
 @dataclass(frozen=True)
+class DCAAssetPolicy:
+    """Politica individual por moneda."""
+
+    dip_threshold: float   # Ej. -0.07 = compra si cae >7%
+    take_profit_pct: float # Ej. 0.175 = vende si sube 17.5%
+    stop_loss_pct: float   # Ej. -0.105 = vende si cae 10.5%
+
+
+# Politica optima por moneda (backtested 365d, 84 combos/moneda)
+DEFAULT_ASSET_POLICIES: dict[str, DCAAssetPolicy] = {
+    "BTCUSDT": DCAAssetPolicy(
+        dip_threshold=-0.07,
+        take_profit_pct=0.175,
+        stop_loss_pct=-0.105,
+    ),
+    "ETHUSDT": DCAAssetPolicy(
+        dip_threshold=-0.05,
+        take_profit_pct=0.10,
+        stop_loss_pct=-0.075,
+    ),
+    "BNBUSDT": DCAAssetPolicy(
+        dip_threshold=-0.04,
+        take_profit_pct=0.20,
+        stop_loss_pct=-0.08,
+    ),
+}
+
+
+@dataclass(frozen=True)
 class DCAConfig:
     """Parametros de la estrategia DCA Inteligente."""
 
     enabled: bool = True
-    assets: tuple[str, ...] = ("BTCUSDT", "ETHUSDT")
-    dip_threshold: float = -0.05    # Compra cuando cae >5% en 24h
-    take_profit_pct: float = 0.15   # Vende cuando sube 15%
+    assets: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "BNBUSDT")
+    # Parametros globales (fallback si no hay politica por moneda)
+    dip_threshold: float = -0.05
+    take_profit_pct: float = 0.15
+    stop_loss_pct: float = -0.10
     min_order_usdt: float = 10.0
 
 
