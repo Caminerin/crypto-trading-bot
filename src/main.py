@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from src.allocation.allocator import PortfolioAllocator
-from src.config import MODELS_DIR, AppConfig, load_config
+from src.config import DEFAULT_ASSET_POLICIES, MODELS_DIR, AppConfig, load_config
 from src.data.binance_client import BinanceDataClient, BinanceTradingClient
 from src.execution.executor import OrderExecutor
 from src.model.predictor import PricePredictor
@@ -245,7 +245,9 @@ def run_daily(config: AppConfig | None = None) -> None:
             budget_usdt=dca_budget,
             dip_threshold=config.dca.dip_threshold,
             take_profit_pct=config.dca.take_profit_pct,
+            stop_loss_pct=config.dca.stop_loss_pct,
             assets=list(config.dca.assets),
+            asset_policies=DEFAULT_ASSET_POLICIES,
         )
 
         # Obtener cambios de precio 24h y precios actuales para activos DCA
