@@ -65,7 +65,37 @@ class DCAAssetPolicy:
     stop_loss_pct: float   # Ej. -0.105 = vende si cae 10.5%
 
 
-# Politica optima por moneda (backtested 365d, 84 combos/moneda)
+@dataclass(frozen=True)
+class MomentumAssetPolicy:
+    """Política individual por moneda para la estrategia momentum."""
+
+    momentum_threshold: float  # Ej. 0.05 = compra si sube >5% en 24h
+    take_profit_pct: float     # Ej. 0.10 = vende si sube 10%
+    stop_loss_pct: float       # Ej. -0.05 = vende si cae 5%
+    trend_days: int = 7        # Días para confirmar tendencia alcista
+
+
+# Política óptima momentum por moneda
+DEFAULT_MOMENTUM_POLICIES: dict[str, MomentumAssetPolicy] = {
+    "BTCUSDT": MomentumAssetPolicy(
+        momentum_threshold=0.05,
+        take_profit_pct=0.10,
+        stop_loss_pct=-0.05,
+    ),
+    "ETHUSDT": MomentumAssetPolicy(
+        momentum_threshold=0.07,
+        take_profit_pct=0.10,
+        stop_loss_pct=-0.05,
+    ),
+    "BNBUSDT": MomentumAssetPolicy(
+        momentum_threshold=0.07,
+        take_profit_pct=0.10,
+        stop_loss_pct=-0.05,
+    ),
+}
+
+
+# Política óptima por moneda (backtested 365d, 84 combos/moneda)
 DEFAULT_ASSET_POLICIES: dict[str, DCAAssetPolicy] = {
     "BTCUSDT": DCAAssetPolicy(
         dip_threshold=-0.07,
@@ -99,6 +129,20 @@ class DCAConfig:
 
 
 @dataclass(frozen=True)
+class MomentumConfig:
+    """Parámetros de la estrategia Momentum."""
+
+    enabled: bool = False
+    assets: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "BNBUSDT")
+    # Parámetros globales (fallback si no hay política por moneda)
+    momentum_threshold: float = 0.05
+    take_profit_pct: float = 0.10
+    stop_loss_pct: float = -0.05
+    trend_days: int = 7
+    min_order_usdt: float = 10.0
+
+
+@dataclass(frozen=True)
 class AllocationConfig:
     """Reparto del balance entre estrategias (virtual wallets)."""
 
@@ -126,6 +170,7 @@ class AppConfig:
     risk: RiskConfig = field(default_factory=RiskConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
     dca: DCAConfig = field(default_factory=DCAConfig)
+    momentum: MomentumConfig = field(default_factory=MomentumConfig)
     allocation: AllocationConfig = field(default_factory=AllocationConfig)
 
     @property
