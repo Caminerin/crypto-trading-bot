@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Backtesting multi-combinacion DCA Inteligente.
+Backtesting multi-combinacion DCA Inteligente — bateria ampliada.
 
-Ejecuta multiples configuraciones de parametros y muestra una tabla
-comparativa para elegir la mejor combinacion.
+Genera combinaciones de forma programatica variando:
+  - Grupo de monedas (BTC, BNB, BTC+BNB, +ETH, +SOL, 5 monedas)
+  - Umbral de compra (dip)
+  - Multiplicador Take-Profit
+  - Multiplicador Stop-Loss
 
 Uso:
     python3 scripts/backtest_dca_multi.py [--days 365] [--budget 30]
@@ -12,6 +15,7 @@ Uso:
 from __future__ import annotations
 
 import argparse
+from itertools import product
 from pathlib import Path
 
 import pandas as pd
@@ -23,152 +27,116 @@ from backtest_dca import (
 )
 
 # ---------------------------------------------------------------------------
-# Combinaciones a probar
+# Generador de combinaciones
 # ---------------------------------------------------------------------------
 
-# Formato: (nombre, {symbol: {dip_threshold, take_profit, stop_loss}})
-# Regla base: TP = Nx umbral, SL = Mx umbral
+# Grupos de monedas a probar
+COIN_GROUPS: dict[str, list[str]] = {
+    "BTC":         ["BTCUSDT"],
+    "BNB":         ["BNBUSDT"],
+    "BTC+BNB":     ["BTCUSDT", "BNBUSDT"],
+    "BTC+BNB+ETH": ["BTCUSDT", "BNBUSDT", "ETHUSDT"],
+    "BTC+BNB+SOL": ["BTCUSDT", "BNBUSDT", "SOLUSDT"],
+    "5monedas":    ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"],
+}
 
-COMBINATIONS: list[tuple[str, dict[str, dict[str, float]]]] = [
-    # --- v2 original (referencia) ---
-    (
-        "v2-base (dip5/3, TP3x, SL2x)",
-        {
-            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.09, "stop_loss": -0.06},
-            "ETHUSDT": {"dip_threshold": -0.05, "take_profit": 0.15, "stop_loss": -0.10},
-            "SOLUSDT": {"dip_threshold": -0.05, "take_profit": 0.15, "stop_loss": -0.10},
-            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.09, "stop_loss": -0.06},
-            "XRPUSDT": {"dip_threshold": -0.05, "take_profit": 0.15, "stop_loss": -0.10},
-        },
-    ),
-    # --- Altcoins -7%, SL 2x ---
-    (
-        "dip7/3, TP3x, SL2x",
-        {
-            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.09, "stop_loss": -0.06},
-            "ETHUSDT": {"dip_threshold": -0.07, "take_profit": 0.21, "stop_loss": -0.14},
-            "SOLUSDT": {"dip_threshold": -0.07, "take_profit": 0.21, "stop_loss": -0.14},
-            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.09, "stop_loss": -0.06},
-            "XRPUSDT": {"dip_threshold": -0.07, "take_profit": 0.21, "stop_loss": -0.14},
-        },
-    ),
-    # --- Altcoins -7%, SL 2.5x ---
-    (
-        "dip7/3, TP3x, SL2.5x",
-        {
-            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.09, "stop_loss": -0.075},
-            "ETHUSDT": {"dip_threshold": -0.07, "take_profit": 0.21, "stop_loss": -0.175},
-            "SOLUSDT": {"dip_threshold": -0.07, "take_profit": 0.21, "stop_loss": -0.175},
-            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.09, "stop_loss": -0.075},
-            "XRPUSDT": {"dip_threshold": -0.07, "take_profit": 0.21, "stop_loss": -0.175},
-        },
-    ),
-    # --- Altcoins -10%, SL 2x ---
-    (
-        "dip10/3, TP3x, SL2x",
-        {
-            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.09, "stop_loss": -0.06},
-            "ETHUSDT": {"dip_threshold": -0.10, "take_profit": 0.30, "stop_loss": -0.20},
-            "SOLUSDT": {"dip_threshold": -0.10, "take_profit": 0.30, "stop_loss": -0.20},
-            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.09, "stop_loss": -0.06},
-            "XRPUSDT": {"dip_threshold": -0.10, "take_profit": 0.30, "stop_loss": -0.20},
-        },
-    ),
-    # --- Solo BTC+BNB (las ganadoras), dip3%, SL 2x ---
-    (
-        "solo BTC+BNB, dip3, TP3x, SL2x",
-        {
-            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.09, "stop_loss": -0.06},
-            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.09, "stop_loss": -0.06},
-        },
-    ),
-    # --- Todo -5%, TP 4x, SL 2x (TP mas alto) ---
-    (
-        "dip5/3, TP4x, SL2x",
-        {
-            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.12, "stop_loss": -0.06},
-            "ETHUSDT": {"dip_threshold": -0.05, "take_profit": 0.20, "stop_loss": -0.10},
-            "SOLUSDT": {"dip_threshold": -0.05, "take_profit": 0.20, "stop_loss": -0.10},
-            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.12, "stop_loss": -0.06},
-            "XRPUSDT": {"dip_threshold": -0.05, "take_profit": 0.20, "stop_loss": -0.10},
-        },
-    ),
-    # --- Altcoins -7%, TP 4x, SL 2x ---
-    (
-        "dip7/3, TP4x, SL2x",
-        {
-            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.12, "stop_loss": -0.06},
-            "ETHUSDT": {"dip_threshold": -0.07, "take_profit": 0.28, "stop_loss": -0.14},
-            "SOLUSDT": {"dip_threshold": -0.07, "take_profit": 0.28, "stop_loss": -0.14},
-            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.12, "stop_loss": -0.06},
-            "XRPUSDT": {"dip_threshold": -0.07, "take_profit": 0.28, "stop_loss": -0.14},
-        },
-    ),
-    # --- BTC -5%, Altcoins -7%, TP3x, SL2x ---
-    (
-        "BTC-5/alt-7, TP3x, SL2x",
-        {
-            "BTCUSDT": {"dip_threshold": -0.05, "take_profit": 0.15, "stop_loss": -0.10},
-            "ETHUSDT": {"dip_threshold": -0.07, "take_profit": 0.21, "stop_loss": -0.14},
-            "SOLUSDT": {"dip_threshold": -0.07, "take_profit": 0.21, "stop_loss": -0.14},
-            "BNBUSDT": {"dip_threshold": -0.05, "take_profit": 0.15, "stop_loss": -0.10},
-            "XRPUSDT": {"dip_threshold": -0.07, "take_profit": 0.21, "stop_loss": -0.14},
-        },
-    ),
-    # --- TP 2x (vende antes, mas trades cerrados) ---
-    (
-        "dip5/3, TP2x, SL2x",
-        {
-            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.06, "stop_loss": -0.06},
-            "ETHUSDT": {"dip_threshold": -0.05, "take_profit": 0.10, "stop_loss": -0.10},
-            "SOLUSDT": {"dip_threshold": -0.05, "take_profit": 0.10, "stop_loss": -0.10},
-            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.06, "stop_loss": -0.06},
-            "XRPUSDT": {"dip_threshold": -0.05, "take_profit": 0.10, "stop_loss": -0.10},
-        },
-    ),
-    # --- TP 2x con altcoins -7% ---
-    (
-        "dip7/3, TP2x, SL2x",
-        {
-            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.06, "stop_loss": -0.06},
-            "ETHUSDT": {"dip_threshold": -0.07, "take_profit": 0.14, "stop_loss": -0.14},
-            "SOLUSDT": {"dip_threshold": -0.07, "take_profit": 0.14, "stop_loss": -0.14},
-            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.06, "stop_loss": -0.06},
-            "XRPUSDT": {"dip_threshold": -0.07, "take_profit": 0.14, "stop_loss": -0.14},
-        },
-    ),
-    # --- Solo BTC+BNB con TP 2x ---
-    (
-        "solo BTC+BNB, dip3, TP2x, SL2x",
-        {
-            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.06, "stop_loss": -0.06},
-            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.06, "stop_loss": -0.06},
-        },
-    ),
-    # --- TP 2.5x (punto medio entre 2x y 3x) ---
-    (
-        "dip5/3, TP2.5x, SL2x",
-        {
-            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.075, "stop_loss": -0.06},
-            "ETHUSDT": {"dip_threshold": -0.05, "take_profit": 0.125, "stop_loss": -0.10},
-            "SOLUSDT": {"dip_threshold": -0.05, "take_profit": 0.125, "stop_loss": -0.10},
-            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.075, "stop_loss": -0.06},
-            "XRPUSDT": {"dip_threshold": -0.05, "take_profit": 0.125, "stop_loss": -0.10},
-        },
-    ),
-    # --- Solo BTC+BNB con TP 2.5x ---
-    (
-        "solo BTC+BNB, dip3, TP2.5x, SL2x",
-        {
-            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.075, "stop_loss": -0.06},
-            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.075, "stop_loss": -0.06},
-        },
-    ),
+# Clasificacion de monedas
+STABLE_COINS = {"BTCUSDT", "BNBUSDT"}  # dip mas bajo
+ALT_COINS = {"ETHUSDT", "SOLUSDT", "XRPUSDT"}  # dip mas alto
+
+# Parametros a variar
+# (dip_stable%, dip_alt%)
+DIP_COMBOS: list[tuple[float, float]] = [
+    (0.02, 0.05),   # 2%/5%  — muy sensible
+    (0.03, 0.05),   # 3%/5%  — base original
+    (0.03, 0.07),   # 3%/7%  — alt mas selectivo
+    (0.04, 0.07),   # 4%/7%  — ambos selectivos
+    (0.04, 0.10),   # 4%/10% — muy selectivo
+    (0.05, 0.07),   # 5%/7%  — BTC selectivo
+    (0.05, 0.10),   # 5%/10% — muy selectivo ambos
+    (0.02, 0.03),   # 2%/3%  — todo muy sensible
+    (0.03, 0.03),   # 3%/3%  — igual para todos
 ]
 
+TP_MULTIPLIERS: list[float] = [1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
+SL_MULTIPLIERS: list[float] = [1.5, 2.0, 2.5, 3.0]
+
+
+def _build_config(
+    coins: list[str],
+    dip_stable: float,
+    dip_alt: float,
+    tp_mult: float,
+    sl_mult: float,
+) -> dict[str, dict[str, float]]:
+    """Construye config por moneda dados los parametros."""
+    cfg: dict[str, dict[str, float]] = {}
+    for coin in coins:
+        dip = dip_stable if coin in STABLE_COINS else dip_alt
+        cfg[coin] = {
+            "dip_threshold": -dip,
+            "take_profit": dip * tp_mult,
+            "stop_loss": -(dip * sl_mult),
+        }
+    return cfg
+
+
+def _make_name(
+    group: str,
+    dip_stable: float,
+    dip_alt: float,
+    tp_mult: float,
+    sl_mult: float,
+) -> str:
+    """Genera nombre corto para la combinacion."""
+    ds = f"{dip_stable*100:.0f}"
+    da = f"{dip_alt*100:.0f}"
+    tp = f"{tp_mult:.1f}".rstrip("0").rstrip(".")
+    sl = f"{sl_mult:.1f}".rstrip("0").rstrip(".")
+    return f"{group} d{ds}/{da} TP{tp}x SL{sl}x"
+
+
+def generate_combinations() -> list[tuple[str, dict[str, dict[str, float]]]]:
+    """Genera todas las combinaciones validas."""
+    combos: list[tuple[str, dict[str, dict[str, float]]]] = []
+    seen: set[str] = set()
+
+    for group_name, coins in COIN_GROUPS.items():
+        has_alt = any(c in ALT_COINS for c in coins)
+
+        for (dip_s, dip_a), tp_m, sl_m in product(
+            DIP_COMBOS, TP_MULTIPLIERS, SL_MULTIPLIERS,
+        ):
+            # Filtro: SL no puede ser >= TP (no tiene sentido)
+            if sl_m >= tp_m:
+                continue
+
+            # Filtro: si no hay altcoins, dip_a no importa — dedup
+            if not has_alt:
+                key = f"{group_name}|{dip_s}|TP{tp_m}|SL{sl_m}"
+            else:
+                key = f"{group_name}|{dip_s}/{dip_a}|TP{tp_m}|SL{sl_m}"
+
+            if key in seen:
+                continue
+            seen.add(key)
+
+            # Filtro: si solo hay stables, usar dip_s para todo
+            effective_dip_a = dip_a if has_alt else dip_s
+
+            name = _make_name(
+                group_name, dip_s, effective_dip_a, tp_m, sl_m,
+            )
+            cfg = _build_config(
+                coins, dip_s, effective_dip_a, tp_m, sl_m,
+            )
+            combos.append((name, cfg))
+
+    return combos
+
 
 # ---------------------------------------------------------------------------
-# Ejecucion
+# Ejecucion y tabla
 # ---------------------------------------------------------------------------
 
 def _fmt_sign(val: float) -> str:
@@ -176,26 +144,43 @@ def _fmt_sign(val: float) -> str:
 
 
 def run_all(
-    prices: dict[str, pd.DataFrame], budget: float, days: int,
+    prices: dict[str, pd.DataFrame],
+    budget: float,
+    days: int,
+    combinations: list[tuple[str, dict[str, dict[str, float]]]],
 ) -> str:
     """Ejecuta todas las combinaciones y devuelve tabla comparativa."""
     results: list[tuple[str, BacktestResult]] = []
 
-    for name, cfgs in COMBINATIONS:
-        # Filtrar precios a solo los simbolos de esta combinacion
+    total = len(combinations)
+    for idx, (name, cfgs) in enumerate(combinations, 1):
+        if idx % 50 == 0 or idx == total:
+            print(f"  [{idx}/{total}]", flush=True)
         combo_prices = {s: prices[s] for s in cfgs if s in prices}
         r = run_backtest(combo_prices, budget, asset_configs=cfgs)
         results.append((name, r))
 
+    # Ordenar por resultado (mejor primero)
+    results.sort(key=lambda x: x[1].final_value, reverse=True)
+
     # Construir tabla
     lines: list[str] = [
         "",
-        "=" * 100,
-        "  COMPARATIVA BACKTESTING DCA — MULTIPLES COMBINACIONES",
-        "=" * 100,
-        f"  Periodo: {days} dias | Presupuesto: ${budget:.2f} USDT",
+        "=" * 115,
+        "  COMPARATIVA BACKTESTING DCA — BATERIA AMPLIADA",
+        "=" * 115,
+        f"  Periodo: {days} dias | Presupuesto: ${budget:.2f} USDT"
+        f" | {total} combinaciones probadas",
         "",
-        f"  {'Combinacion':<35s}"
+    ]
+
+    # --- TOP 20 ---
+    top_n = min(20, len(results))
+    lines.extend([
+        f"  TOP {top_n} MEJORES:",
+        "",
+        f"  {'#':>3s}"
+        f" {'Combinacion':<38s}"
         f" {'P&L':>9s}"
         f" {'%':>7s}"
         f" {'Trades':>7s}"
@@ -206,10 +191,10 @@ def run_all(
         f" {'HoldD':>6s}"
         f" {'Mejor':>7s}"
         f" {'Peor':>7s}",
-        "  " + "-" * 96,
-    ]
+        "  " + "-" * 112,
+    ])
 
-    for name, r in results:
+    for rank, (name, r) in enumerate(results[:top_n], 1):
         pnl_pct = (
             (r.final_value - r.initial_budget) / r.initial_budget * 100
             if r.initial_budget > 0 else 0
@@ -221,7 +206,8 @@ def run_all(
             if r.sells > 0 else "N/A"
         )
         lines.append(
-            f"  {name:<35s}"
+            f"  {rank:>3d}"
+            f" {name:<38s}"
             f" {s}${abs(r.total_profit):>7.2f}"
             f" {sp}{abs(pnl_pct):>5.1f}%"
             f" {r.total_trades:>7d}"
@@ -234,19 +220,115 @@ def run_all(
             f" {r.worst_trade_pct:>6.1f}%",
         )
 
-    # Encontrar la mejor combinacion
-    best_name, best_r = max(results, key=lambda x: x[1].final_value)
-    best_pnl = best_r.final_value - best_r.initial_budget
-    bs = _fmt_sign(best_pnl)
-    best_pct = best_pnl / best_r.initial_budget * 100 if best_r.initial_budget > 0 else 0
-    bsp = _fmt_sign(best_pct)
+    # --- BOTTOM 5 ---
+    lines.extend([
+        "",
+        "  PEORES 5:",
+        "  " + "-" * 112,
+    ])
+    for rank, (name, r) in enumerate(
+        results[-5:], len(results) - 4,
+    ):
+        pnl_pct = (
+            (r.final_value - r.initial_budget) / r.initial_budget * 100
+            if r.initial_budget > 0 else 0
+        )
+        s = _fmt_sign(r.total_profit)
+        sp = _fmt_sign(pnl_pct)
+        wr = (
+            f"{r.wins / r.sells * 100:.0f}%"
+            if r.sells > 0 else "N/A"
+        )
+        lines.append(
+            f"  {rank:>3d}"
+            f" {name:<38s}"
+            f" {s}${abs(r.total_profit):>7.2f}"
+            f" {sp}{abs(pnl_pct):>5.1f}%"
+            f" {r.total_trades:>7d}"
+            f" {r.take_profits:>4d}"
+            f" {r.stop_losses:>4d}"
+            f" {wr:>5s}"
+            f" {-r.max_drawdown_pct:>6.1f}%"
+            f" {r.avg_hold_days:>5.0f}d"
+            f" +{r.best_trade_pct:>5.1f}%"
+            f" {r.worst_trade_pct:>6.1f}%",
+        )
+
+    # --- Estadisticas ---
+    profitable = sum(
+        1 for _, r in results
+        if r.final_value > r.initial_budget
+    )
+    breakeven = sum(
+        1 for _, r in results
+        if r.final_value == r.initial_budget
+    )
+    negative = total - profitable - breakeven
+    pnl_vals = [
+        r.final_value - r.initial_budget for _, r in results
+    ]
+    avg_pnl = sum(pnl_vals) / len(pnl_vals) if pnl_vals else 0
+    median_pnl = sorted(pnl_vals)[len(pnl_vals) // 2] if pnl_vals else 0
+
+    pct_profit = profitable * 100 // total if total > 0 else 0
+    pct_loss = negative * 100 // total if total > 0 else 0
 
     lines.extend([
         "",
-        "=" * 100,
-        f"  GANADORA: {best_name}",
-        f"  Resultado: {bs}${abs(best_pnl):.2f} ({bsp}{abs(best_pct):.1f}%)",
-        "=" * 100,
+        "=" * 115,
+        "  ESTADISTICAS GLOBALES",
+        "=" * 115,
+        f"  Combinaciones probadas: {total}",
+        f"  Rentables (>0%):        {profitable} ({pct_profit}%)",
+        f"  En perdida (<0%):       {negative} ({pct_loss}%)",
+        f"  P&L promedio:           ${avg_pnl:+.2f}",
+        f"  P&L mediana:            ${median_pnl:+.2f}",
+        "",
+    ])
+
+    # --- Analisis por grupo de monedas ---
+    lines.extend([
+        "  MEJOR POR GRUPO DE MONEDAS:",
+        "  " + "-" * 60,
+    ])
+    group_best: dict[str, tuple[str, BacktestResult]] = {}
+    for name, r in results:
+        # Extraer grupo del nombre
+        group = name.split(" d")[0]
+        if group not in group_best:
+            group_best[group] = (name, r)
+
+    for group, (name, r) in group_best.items():
+        pnl = r.final_value - r.initial_budget
+        pnl_pct = (
+            pnl / r.initial_budget * 100
+            if r.initial_budget > 0 else 0
+        )
+        s = _fmt_sign(pnl)
+        sp = _fmt_sign(pnl_pct)
+        lines.append(
+            f"    {group:<16s}: {s}${abs(pnl):.2f}"
+            f" ({sp}{abs(pnl_pct):.1f}%)"
+            f"  -- {name}",
+        )
+    lines.append("")
+
+    # --- Ganadora absoluta ---
+    best_name, best_r = results[0]
+    best_pnl = best_r.final_value - best_r.initial_budget
+    bs = _fmt_sign(best_pnl)
+    best_pct = (
+        best_pnl / best_r.initial_budget * 100
+        if best_r.initial_budget > 0 else 0
+    )
+    bsp = _fmt_sign(best_pct)
+
+    lines.extend([
+        "=" * 115,
+        f"  GANADORA ABSOLUTA: {best_name}",
+        f"  Resultado: {bs}${abs(best_pnl):.2f}"
+        f" ({bsp}{abs(best_pct):.1f}%)",
+        "=" * 115,
         "",
     ])
 
@@ -263,7 +345,7 @@ def run_all(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Backtest DCA multi-combinacion",
+        description="Backtest DCA multi-combinacion (bateria ampliada)",
     )
     parser.add_argument(
         "--days", type=int, default=365,
@@ -274,6 +356,10 @@ def main() -> None:
         help="Presupuesto DCA en USDT (default: 30)",
     )
     args = parser.parse_args()
+
+    # Generar combinaciones
+    combinations = generate_combinations()
+    print(f"\nGeneradas {len(combinations)} combinaciones")
 
     # Descargar datos una sola vez (todas las monedas posibles)
     all_symbols = sorted(set(DCA_ASSETS))
@@ -286,8 +372,8 @@ def main() -> None:
         prices[symbol] = df
         print(f"{len(df)} velas")
 
-    print(f"\nEjecutando {len(COMBINATIONS)} combinaciones...")
-    report = run_all(prices, args.budget, args.days)
+    print(f"\nEjecutando {len(combinations)} combinaciones...")
+    report = run_all(prices, args.budget, args.days, combinations)
     print(report)
 
     # Guardar reporte
