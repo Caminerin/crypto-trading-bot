@@ -1,15 +1,18 @@
-# Ejecución diaria del bot de trading a las 07:00 UTC.
+# Ejecución diaria del bot de trading.
 #
-# Los secrets de Binance, SendGrid y email se configuran en
+# DESACTIVADO: La ejecución automática se ha movido a un servidor
+# Hetzner (Europa) para poder operar en live sin geo-bloqueo de Binance.
+# Se mantiene workflow_dispatch para poder lanzarlo manualmente si se necesita.
+#
+# Los secrets de Binance, Mailjet y email se configuran en
 # Settings > Secrets and variables > Actions del repositorio.
 
 name: Daily Trading Bot
 
 on:
-  schedule:
-    # Todos los días a las 07:00 y 19:00 UTC
-    - cron: "0 7 * * *"
-    - cron: "0 19 * * *"
+  # schedule:
+  #   - cron: "0 7 * * *"
+  #   - cron: "0 19 * * *"
   workflow_dispatch:
     # Permite ejecución manual desde la UI de GitHub
 

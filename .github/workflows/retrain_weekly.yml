@@ -1,14 +1,14 @@
-# Re-entrenamiento semanal del modelo (domingos a las 06:00 UTC).
+# Re-entrenamiento semanal del modelo.
 #
-# Se ejecuta 1 hora antes del trading diario para que el modelo
-# esté fresco cuando el bot opere a las 07:00.
+# DESACTIVADO: La ejecución automática se ha movido a un servidor
+# Hetzner (Europa) para poder operar en live sin geo-bloqueo de Binance.
+# Se mantiene workflow_dispatch para poder lanzarlo manualmente si se necesita.
 
 name: Weekly Model Retrain
 
 on:
-  schedule:
-    # Domingos a las 06:00 UTC
-    - cron: "0 6 * * 0"
+  # schedule:
+  #   - cron: "0 6 * * 0"
   workflow_dispatch:
 
 jobs:
