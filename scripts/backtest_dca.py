@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Backtesting de la estrategia DCA Inteligente.
+Backtesting de la estrategia DCA Inteligente v2.
 
-Descarga datos historicos de BTC y ETH desde Binance y simula
-la estrategia DCA: compra en caidas >5% diarias, vende al +15%.
+Descarga datos historicos de BTC, ETH, SOL, BNB y XRP desde Binance
+y simula la estrategia DCA con parametros personalizados por moneda.
+
+Regla: TP = 3x umbral de compra, SL = 2x umbral de compra.
 
 Uso:
-    python scripts/backtest_dca.py [--days 365] [--budget 30]
+    python3 scripts/backtest_dca.py [--days 365] [--budget 30]
 """
 
 from __future__ import annotations
@@ -20,12 +22,39 @@ import pandas as pd
 import requests
 
 # ---------------------------------------------------------------------------
-# Configuracion
+# Configuracion por moneda
+# Regla: TP = 3x umbral, SL = 2x umbral
 # ---------------------------------------------------------------------------
 
-DCA_ASSETS = ["BTCUSDT", "ETHUSDT"]
-DIP_THRESHOLD = -0.05      # Compra cuando cae >5% en 24h
-TAKE_PROFIT_PCT = 0.15     # Vende cuando sube +15%
+ASSET_CONFIGS: dict[str, dict[str, float]] = {
+    "BTCUSDT": {
+        "dip_threshold": -0.03,   # Compra si cae >3%
+        "take_profit":    0.09,   # Vende al +9%  (3x de 3%)
+        "stop_loss":     -0.06,   # Corta al -6%  (2x de 3%)
+    },
+    "ETHUSDT": {
+        "dip_threshold": -0.05,   # Compra si cae >5%
+        "take_profit":    0.15,   # Vende al +15% (3x de 5%)
+        "stop_loss":     -0.10,   # Corta al -10% (2x de 5%)
+    },
+    "SOLUSDT": {
+        "dip_threshold": -0.05,   # Compra si cae >5%
+        "take_profit":    0.15,   # Vende al +15% (3x de 5%)
+        "stop_loss":     -0.10,   # Corta al -10% (2x de 5%)
+    },
+    "BNBUSDT": {
+        "dip_threshold": -0.03,   # Compra si cae >3%
+        "take_profit":    0.09,   # Vende al +9%  (3x de 3%)
+        "stop_loss":     -0.06,   # Corta al -6%  (2x de 3%)
+    },
+    "XRPUSDT": {
+        "dip_threshold": -0.05,   # Compra si cae >5%
+        "take_profit":    0.15,   # Vende al +15% (3x de 5%)
+        "stop_loss":     -0.10,   # Corta al -10% (2x de 5%)
+    },
+}
+
+DCA_ASSETS = list(ASSET_CONFIGS.keys())
 MIN_ORDER_USDT = 10.0
 
 
@@ -97,6 +126,8 @@ class BacktestResult:
     sells: int = 0
     wins: int = 0
     losses: int = 0
+    stop_losses: int = 0
+    take_profits: int = 0
     total_profit: float = 0.0
     max_drawdown_pct: float = 0.0
     best_trade_pct: float = 0.0
@@ -105,15 +136,14 @@ class BacktestResult:
     trades_log: list[dict] = field(default_factory=list)
     open_positions: list[dict] = field(default_factory=list)
     daily_equity: list[dict] = field(default_factory=list)
+    per_asset_pnl: dict[str, float] = field(default_factory=dict)
 
 
 def run_backtest(
     prices: dict[str, pd.DataFrame],
     budget: float,
-    dip_threshold: float = DIP_THRESHOLD,
-    take_profit_pct: float = TAKE_PROFIT_PCT,
 ) -> BacktestResult:
-    """Simula la estrategia DCA sobre datos historicos."""
+    """Simula la estrategia DCA con params por moneda (TP+SL)."""
 
     result = BacktestResult(initial_budget=budget)
     positions: list[BTPosition] = []
@@ -122,8 +152,9 @@ def run_backtest(
     max_dd = 0.0
     hold_days_list: list[float] = []
     trade_returns: list[float] = []
+    asset_pnl: dict[str, float] = {sym: 0.0 for sym in DCA_ASSETS}
 
-    # Construir timeline unificado (dias que tenemos datos de todos los assets)
+    # Construir timeline unificado
     all_dates: set[pd.Timestamp] = set()
     for df in prices.values():
         all_dates.update(df.index)
@@ -135,11 +166,11 @@ def run_backtest(
 
     for i, date in enumerate(sorted_dates):
         if i == 0:
-            continue  # Necesitamos dia anterior para calcular cambio 24h
+            continue
 
         prev_date = sorted_dates[i - 1]
 
-        # Precios actuales
+        # Precios actuales y cambios 24h
         current_prices: dict[str, float] = {}
         changes_24h: dict[str, float] = {}
         for symbol, df in prices.items():
@@ -150,29 +181,43 @@ def run_backtest(
                     (current_prices[symbol] - prev_close) / prev_close
                 )
 
-        # 1. Check take-profits
+        # 1. Check take-profits y stop-losses
         sells_to_remove: list[str] = []
         for pos in positions:
             price = current_prices.get(pos.symbol)
             if price is None:
                 continue
+
+            cfg = ASSET_CONFIGS[pos.symbol]
             pnl_pct = (price - pos.entry_price) / pos.entry_price
-            if pnl_pct >= take_profit_pct:
+
+            sell_reason = ""
+            if pnl_pct >= cfg["take_profit"]:
+                sell_reason = "TP"
+                result.take_profits += 1
+            elif pnl_pct <= cfg["stop_loss"]:
+                sell_reason = "SL"
+                result.stop_losses += 1
+
+            if sell_reason:
                 sell_value = pos.quantity * price
                 profit = sell_value - pos.invested
                 cash += sell_value
                 result.sells += 1
                 result.total_trades += 1
-                hold_days = (date - pd.Timestamp(pos.entry_date)).days
+                hold_days = (
+                    date - pd.Timestamp(pos.entry_date)
+                ).days
                 hold_days_list.append(hold_days)
                 trade_returns.append(pnl_pct)
-                if pnl_pct >= 0:
+                asset_pnl[pos.symbol] += profit
+                if profit >= 0:
                     result.wins += 1
                 else:
                     result.losses += 1
                 result.trades_log.append({
                     "date": str(date.date()),
-                    "action": "SELL",
+                    "action": f"SELL({sell_reason})",
                     "symbol": pos.symbol,
                     "price": round(price, 2),
                     "entry_price": round(pos.entry_price, 2),
@@ -184,13 +229,24 @@ def run_backtest(
                 })
                 sells_to_remove.append(pos.symbol)
 
-        positions = [p for p in positions if p.symbol not in sells_to_remove]
-
-        # 2. Check dip buys
-        dip_assets = [
-            (sym, chg) for sym, chg in changes_24h.items()
-            if chg <= dip_threshold and sym in DCA_ASSETS
+        positions = [
+            p for p in positions
+            if p.symbol not in sells_to_remove
         ]
+
+        # 2. Check dip buys (umbral propio por moneda)
+        dip_assets: list[tuple[str, float]] = []
+        for symbol in DCA_ASSETS:
+            change = changes_24h.get(symbol)
+            if change is None:
+                continue
+            cfg = ASSET_CONFIGS[symbol]
+            if change <= cfg["dip_threshold"]:
+                already_in = any(
+                    p.symbol == symbol for p in positions
+                )
+                if not already_in:
+                    dip_assets.append((symbol, change))
 
         if dip_assets and cash >= MIN_ORDER_USDT:
             per_buy = cash / len(dip_assets)
@@ -201,28 +257,24 @@ def run_backtest(
                 price = current_prices[symbol]
                 quantity = buy_amount / price
 
-                # Promediar si ya tenemos posicion
-                existing = next(
-                    (p for p in positions if p.symbol == symbol), None,
-                )
-                if existing is not None:
-                    total_inv = existing.invested + buy_amount
-                    total_qty = existing.quantity + quantity
-                    existing.entry_price = total_inv / total_qty
-                    existing.quantity = total_qty
-                    existing.invested = total_inv
-                else:
-                    positions.append(BTPosition(
-                        symbol=symbol,
-                        entry_price=price,
-                        quantity=quantity,
-                        invested=buy_amount,
-                        entry_date=str(date),
-                    ))
+                positions.append(BTPosition(
+                    symbol=symbol,
+                    entry_price=price,
+                    quantity=quantity,
+                    invested=buy_amount,
+                    entry_date=str(date),
+                ))
 
                 cash -= buy_amount
                 result.buys += 1
                 result.total_trades += 1
+                cfg = ASSET_CONFIGS[symbol]
+                tp = round(
+                    price * (1 + cfg["take_profit"]), 2,
+                )
+                sl = round(
+                    price * (1 + cfg["stop_loss"]), 2,
+                )
                 result.trades_log.append({
                     "date": str(date.date()),
                     "action": "BUY",
@@ -230,11 +282,14 @@ def run_backtest(
                     "price": round(price, 2),
                     "amount_usdt": round(buy_amount, 2),
                     "change_24h": round(change * 100, 1),
+                    "tp_target": tp,
+                    "sl_target": sl,
                 })
 
         # Calcular equity diaria
         pos_value = sum(
-            p.quantity * current_prices.get(p.symbol, p.entry_price)
+            p.quantity
+            * current_prices.get(p.symbol, p.entry_price)
             for p in positions
         )
         equity = cash + pos_value
@@ -248,17 +303,21 @@ def run_backtest(
         # Drawdown
         if equity > peak_equity:
             peak_equity = equity
-        dd = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0
+        dd = (
+            (peak_equity - equity) / peak_equity
+            if peak_equity > 0 else 0
+        )
         if dd > max_dd:
             max_dd = dd
 
     # Resultados finales
     final_pos_value = 0.0
+    last_prices: dict[str, float] = {}
+    for symbol, df in prices.items():
+        if len(df) > 0:
+            last_prices[symbol] = df.iloc[-1]["close"]
+
     for pos in positions:
-        last_prices: dict[str, float] = {}
-        for symbol, df in prices.items():
-            if len(df) > 0:
-                last_prices[symbol] = df.iloc[-1]["close"]
         price = last_prices.get(pos.symbol, pos.entry_price)
         pv = pos.quantity * price
         final_pos_value += pv
@@ -273,17 +332,24 @@ def run_backtest(
         })
 
     result.final_value = round(cash + final_pos_value, 2)
-    result.total_profit = round(result.final_value - budget, 2)
+    result.total_profit = round(
+        result.final_value - budget, 2,
+    )
     result.max_drawdown_pct = round(max_dd * 100, 2)
-    result.best_trade_pct = round(
-        max(trade_returns) * 100, 1,
-    ) if trade_returns else 0.0
-    result.worst_trade_pct = round(
-        min(trade_returns) * 100, 1,
-    ) if trade_returns else 0.0
-    result.avg_hold_days = round(
-        sum(hold_days_list) / len(hold_days_list), 1,
-    ) if hold_days_list else 0.0
+    if trade_returns:
+        result.best_trade_pct = round(
+            max(trade_returns) * 100, 1,
+        )
+        result.worst_trade_pct = round(
+            min(trade_returns) * 100, 1,
+        )
+    if hold_days_list:
+        result.avg_hold_days = round(
+            sum(hold_days_list) / len(hold_days_list), 1,
+        )
+    result.per_asset_pnl = {
+        k: round(v, 2) for k, v in asset_pnl.items()
+    }
 
     return result
 
@@ -292,102 +358,159 @@ def run_backtest(
 # Reporte
 # ---------------------------------------------------------------------------
 
+def _fmt_sign(val: float) -> str:
+    return "+" if val >= 0 else ""
+
+
 def print_report(result: BacktestResult, days: int) -> str:
     """Genera reporte legible del backtesting."""
     pnl_pct = (
-        (result.final_value - result.initial_budget) / result.initial_budget * 100
+        (result.final_value - result.initial_budget)
+        / result.initial_budget * 100
         if result.initial_budget > 0 else 0
     )
-    pnl_sign = "+" if result.total_profit >= 0 else ""
+    s = _fmt_sign(result.total_profit)
 
     lines = [
         "",
-        "=" * 60,
-        "  BACKTESTING DCA INTELIGENTE - RESULTADOS",
-        "=" * 60,
+        "=" * 65,
+        "  BACKTESTING DCA INTELIGENTE v2 - RESULTADOS",
+        "=" * 65,
         "",
         f"  Periodo:           Ultimos {days} dias",
-        f"  Activos:           {', '.join(DCA_ASSETS)}",
-        f"  Umbral de compra:  Caida >{abs(DIP_THRESHOLD)*100:.0f}% en 24h",
-        f"  Take-profit:       +{TAKE_PROFIT_PCT*100:.0f}%",
         f"  Presupuesto:       ${result.initial_budget:,.2f} USDT",
         "",
-        "-" * 60,
+        "  Configuracion por moneda (Regla: TP=3x, SL=2x):",
+    ]
+
+    for symbol, cfg in ASSET_CONFIGS.items():
+        nm = symbol.replace("USDT", "")
+        dip = abs(cfg["dip_threshold"]) * 100
+        tp = cfg["take_profit"] * 100
+        sl_val = cfg["stop_loss"] * 100
+        lines.append(
+            f"    {nm:4s} | Compra: >{dip:.0f}%"
+            f" | TP: +{tp:.0f}%"
+            f" | SL: {sl_val:.0f}%"
+        )
+
+    lines.extend([
+        "",
+        "-" * 65,
         "  RENDIMIENTO",
-        "-" * 60,
+        "-" * 65,
         f"  Valor final:       ${result.final_value:,.2f} USDT",
-        f"  Ganancia/Perdida:  {pnl_sign}${result.total_profit:,.2f}"
-        f" ({pnl_sign}{pnl_pct:.1f}%)",
+        (
+            f"  Ganancia/Perdida:  {s}${result.total_profit:,.2f}"
+            f" ({s}{pnl_pct:.1f}%)"
+        ),
         f"  Max drawdown:      -{result.max_drawdown_pct:.1f}%",
         "",
-        "-" * 60,
+        "-" * 65,
         "  OPERACIONES",
-        "-" * 60,
+        "-" * 65,
         f"  Total trades:      {result.total_trades}",
         f"  Compras:           {result.buys}",
-        f"  Ventas:            {result.sells}",
+        (
+            f"  Ventas:            {result.sells}"
+            f"  (TP: {result.take_profits}"
+            f" | SL: {result.stop_losses})"
+        ),
         f"  Ganadoras:         {result.wins}",
         f"  Perdedoras:        {result.losses}",
-        f"  Win rate:          "
-        f"{result.wins / result.sells * 100:.0f}%" if result.sells > 0
-        else "  Win rate:          N/A (sin ventas aun)",
+    ])
+
+    if result.sells > 0:
+        wr = result.wins / result.sells * 100
+        lines.append(f"  Win rate:          {wr:.0f}%")
+    else:
+        lines.append(
+            "  Win rate:          N/A (sin ventas aun)"
+        )
+
+    lines.extend([
         f"  Mejor trade:       +{result.best_trade_pct:.1f}%",
         f"  Peor trade:        {result.worst_trade_pct:.1f}%",
-        f"  Dias hold promedio:{result.avg_hold_days:.0f} dias",
+        f"  Hold promedio:     {result.avg_hold_days:.0f} dias",
         "",
-    ]
+    ])
+
+    # P&L por moneda
+    has_pnl = any(
+        v != 0 for v in result.per_asset_pnl.values()
+    )
+    if has_pnl:
+        lines.extend([
+            "-" * 65,
+            "  P&L POR MONEDA (solo trades cerrados)",
+            "-" * 65,
+        ])
+        for sym, pnl in result.per_asset_pnl.items():
+            nm = sym.replace("USDT", "")
+            ps = _fmt_sign(pnl)
+            lines.append(f"    {nm:4s}: {ps}${pnl:,.2f}")
+        lines.append("")
 
     if result.open_positions:
         lines.extend([
-            "-" * 60,
-            "  POSICIONES ABIERTAS",
-            "-" * 60,
+            "-" * 65,
+            "  POSICIONES ABIERTAS (no vendidas)",
+            "-" * 65,
         ])
         for p in result.open_positions:
-            sign = "+" if p["pnl_pct"] >= 0 else ""
+            ps = _fmt_sign(p["pnl_pct"])
+            nm = p["symbol"].replace("USDT", "")
             lines.append(
-                f"  {p['symbol']:10s} | Compra: ${p['entry_price']:>10,.2f}"
+                f"  {nm:4s}"
+                f" | Compra: ${p['entry_price']:>10,.2f}"
                 f" | Actual: ${p['current_price']:>10,.2f}"
-                f" | {sign}{p['pnl_pct']:.1f}%"
+                f" | {ps}{p['pnl_pct']:.1f}%"
+                f" | Inv: ${p['invested']:,.2f}"
             )
         lines.append("")
 
     if result.trades_log:
         lines.extend([
-            "-" * 60,
+            "-" * 65,
             "  HISTORIAL DE OPERACIONES",
-            "-" * 60,
+            "-" * 65,
         ])
         for t in result.trades_log:
+            nm = t["symbol"].replace("USDT", "")
             if t["action"] == "BUY":
                 lines.append(
-                    f"  {t['date']} | COMPRA {t['symbol']:10s}"
+                    f"  {t['date']}"
+                    f" | COMPRA {nm:4s}"
                     f" | ${t['amount_usdt']:>8,.2f}"
                     f" @ ${t['price']:>10,.2f}"
-                    f" (caida {t['change_24h']:.1f}%)"
+                    f" ({t['change_24h']:.1f}%)"
+                    f" [TP=${t['tp_target']:,.2f}"
+                    f" SL=${t['sl_target']:,.2f}]"
                 )
             else:
-                sign = "+" if t["profit"] >= 0 else ""
+                ps = _fmt_sign(t["profit"])
                 lines.append(
-                    f"  {t['date']} | VENTA  {t['symbol']:10s}"
+                    f"  {t['date']}"
+                    f" | {t['action']:8s} {nm:4s}"
                     f" | ${t['sell_value']:>8,.2f}"
                     f" @ ${t['price']:>10,.2f}"
-                    f" ({sign}${t['profit']:,.2f},"
-                    f" +{t['pnl_pct']:.1f}%,"
+                    f" ({ps}${t['profit']:,.2f},"
+                    f" {ps}{t['pnl_pct']:.1f}%,"
                     f" {t['hold_days']}d)"
                 )
         lines.append("")
 
     lines.extend([
-        "=" * 60,
-        f"  VEREDICTO: {pnl_sign}${result.total_profit:,.2f}"
-        f" ({pnl_sign}{pnl_pct:.1f}%) en {days} dias",
-        "=" * 60,
+        "=" * 65,
+        (
+            f"  VEREDICTO: {s}${result.total_profit:,.2f}"
+            f" ({s}{pnl_pct:.1f}%) en {days} dias"
+        ),
+        "=" * 65,
         "",
     ])
 
-    report = "\n".join(lines)
-    return report
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -395,24 +518,27 @@ def print_report(result: BacktestResult, days: int) -> str:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Backtest DCA Inteligente")
+    parser = argparse.ArgumentParser(
+        description="Backtest DCA v2 (5 monedas, SL+TP)",
+    )
     parser.add_argument(
         "--days", type=int, default=365,
-        help="Dias de historia para simular (default: 365)",
+        help="Dias de historia (default: 365)",
     )
     parser.add_argument(
         "--budget", type=float, default=30.0,
-        help="Presupuesto DCA en USDT (default: 30 = 40%% de 75)",
+        help="Presupuesto DCA en USDT (default: 30)",
     )
     args = parser.parse_args()
 
-    print(f"\nDescargando {args.days} dias de datos historicos...")
+    print(f"\nDescargando {args.days} dias de datos...")
     prices: dict[str, pd.DataFrame] = {}
     for symbol in DCA_ASSETS:
-        print(f"  {symbol}...", end=" ", flush=True)
+        nm = symbol.replace("USDT", "")
+        print(f"  {nm}...", end=" ", flush=True)
         df = download_daily_klines(symbol, args.days)
         prices[symbol] = df
-        print(f"{len(df)} velas descargadas")
+        print(f"{len(df)} velas")
 
     print("\nEjecutando simulacion...")
     result = run_backtest(prices, budget=args.budget)
@@ -423,9 +549,9 @@ def main() -> None:
     # Guardar reporte
     out_dir = Path(__file__).resolve().parent.parent / "data"
     out_dir.mkdir(exist_ok=True)
-    report_path = out_dir / "backtest_dca_report.txt"
-    report_path.write_text(report)
-    print(f"Reporte guardado en: {report_path}")
+    rpath = out_dir / "backtest_dca_report.txt"
+    rpath.write_text(report)
+    print(f"Reporte guardado en: {rpath}")
 
 
 if __name__ == "__main__":
