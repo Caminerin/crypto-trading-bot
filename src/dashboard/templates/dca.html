@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+
+{% block title %}DCA Inteligente — Bot de Trading{% endblock %}
+
+{% block content %}
+<h1>DCA Inteligente</h1>
+
+<!-- Resumen DCA -->
+<div class="stat-grid">
+    <div class="stat-box">
+        <div class="value">${{ dca_budget }}</div>
+        <div class="label">Presupuesto DCA</div>
+    </div>
+    <div class="stat-box">
+        <div class="value">${{ total_invested }}</div>
+        <div class="label">Invertido</div>
+    </div>
+    <div class="stat-box">
+        <div class="value {% if total_pnl > 0 %}positive{% elif total_pnl < 0 %}negative{% else %}neutral{% endif %}">
+            ${{ total_pnl }}
+        </div>
+        <div class="label">P&amp;L Total</div>
+    </div>
+    <div class="stat-box">
+        <div class="value">${{ free_usdt }}</div>
+        <div class="label">Disponible</div>
+    </div>
+</div>
+
+<!-- Posiciones abiertas -->
+<div class="card">
+    <h3>Posiciones Abiertas</h3>
+    {% if positions %}
+    <div style="overflow-x: auto;">
+        <table>
+            <thead>
+                <tr>
+                    <th>Moneda</th>
+                    <th>Precio entrada</th>
+                    <th>Cantidad</th>
+                    <th>Invertido (USDT)</th>
+                    <th>Fecha entrada</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for pos in positions %}
+                <tr>
+                    <td><strong>{{ pos.symbol.replace("USDT", "") }}</strong></td>
+                    <td>${{ "%.2f" | format(pos.entry_price) }}</td>
+                    <td>{{ "%.8f" | format(pos.quantity) }}</td>
+                    <td>${{ "%.2f" | format(pos.invested_usdt) }}</td>
+                    <td>{{ pos.entry_date[:10] if pos.entry_date else "—" }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <p><small class="neutral">Última actualización: {{ updated_at }}</small></p>
+    {% else %}
+    <p>No hay posiciones DCA abiertas actualmente.</p>
+    <p><small class="neutral">El bot comprará automáticamente cuando detecte caídas significativas en BTC, ETH o BNB.</small></p>
+    {% endif %}
+</div>
+
+<!-- Política por activo -->
+<div class="card">
+    <h3>Política por Activo</h3>
+    <p><small>Parámetros optimizados por backtesting (365 días, 84 combinaciones por moneda).</small></p>
+    <div style="overflow-x: auto;">
+        <table>
+            <thead>
+                <tr>
+                    <th>Moneda</th>
+                    <th>Umbral de compra (caída)</th>
+                    <th>Take Profit</th>
+                    <th>Stop Loss</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in policies %}
+                <tr>
+                    <td><strong>{{ p.name }}</strong></td>
+                    <td>{{ "%.0f" | format(p.dip_threshold * 100) }}%</td>
+                    <td class="positive">+{{ "%.1f" | format(p.take_profit_pct * 100) }}%</td>
+                    <td class="negative">{{ "%.1f" | format(p.stop_loss_pct * 100) }}%</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <details>
+        <summary>¿Cómo funciona?</summary>
+        <ul>
+            <li><strong>Umbral de compra</strong>: El bot compra cuando el precio cae más de este porcentaje en 24 horas.</li>
+            <li><strong>Take Profit</strong>: Vende automáticamente cuando la ganancia supera este porcentaje desde el precio de compra.</li>
+            <li><strong>Stop Loss</strong>: Vende automáticamente para limitar pérdidas si el precio cae este porcentaje desde la compra.</li>
+        </ul>
+    </details>
+</div>
+
+{% endblock %}

@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="dark">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Bot de Trading{% endblock %}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <style>
+        :root {
+            --pico-font-size: 16px;
+        }
+        nav {
+            margin-bottom: 1rem;
+        }
+        .card {
+            background: var(--pico-card-background-color);
+            border: 1px solid var(--pico-muted-border-color);
+            border-radius: var(--pico-border-radius);
+            padding: 1.25rem;
+            margin-bottom: 1rem;
+        }
+        .card h3 {
+            margin-top: 0;
+        }
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        .stat-box {
+            text-align: center;
+            padding: 1rem;
+            background: var(--pico-card-background-color);
+            border: 1px solid var(--pico-muted-border-color);
+            border-radius: var(--pico-border-radius);
+        }
+        .stat-box .value {
+            font-size: 1.8rem;
+            font-weight: bold;
+            color: var(--pico-primary);
+        }
+        .stat-box .label {
+            font-size: 0.85rem;
+            color: var(--pico-muted-color);
+            margin-top: 0.25rem;
+        }
+        .positive { color: #22c55e; }
+        .negative { color: #ef4444; }
+        .neutral { color: var(--pico-muted-color); }
+        footer {
+            text-align: center;
+            font-size: 0.8rem;
+            color: var(--pico-muted-color);
+            margin-top: 2rem;
+            padding: 1rem 0;
+        }
+    </style>
+</head>
+<body>
+    <nav class="container-fluid">
+        <ul>
+            <li><strong>Crypto Bot</strong></li>
+        </ul>
+        <ul>
+            <li><a href="/">Inicio</a></li>
+            <li><a href="/dca">DCA</a></li>
+            <li><a href="/api/status">API</a></li>
+        </ul>
+    </nav>
+
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="container">
+        <p>Dashboard de solo lectura &mdash; Actualizado: {{ now }}</p>
+    </footer>
+</body>
+</html>
