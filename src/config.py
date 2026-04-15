@@ -147,7 +147,7 @@ class DCAConfig:
 class MomentumConfig:
     """Parámetros de la estrategia Momentum."""
 
-    enabled: bool = False
+    enabled: bool = True
     assets: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")
     # Parámetros globales (fallback si no hay política por moneda)
     momentum_threshold: float = 0.05
@@ -161,8 +161,9 @@ class MomentumConfig:
 class AllocationConfig:
     """Reparto del balance entre estrategias (virtual wallets)."""
 
-    prediction_pct: float = 0.50   # 50% para bot de prediccion
-    dca_pct: float = 0.40          # 40% para DCA inteligente
+    prediction_pct: float = 0.35   # 35% para bot de prediccion
+    dca_pct: float = 0.20          # 20% para DCA inteligente
+    momentum_pct: float = 0.35     # 35% para momentum
     reserve_pct: float = 0.10      # 10% reserva intocable
 
 

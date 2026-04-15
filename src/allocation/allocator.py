@@ -6,9 +6,10 @@ cada uno asignado a una estrategia distinta.  La asignacion se
 persiste en un fichero JSON para que sobreviva entre ejecuciones.
 
 Ejemplo con 70 EUR (~75 USDT):
-  - prediction: 50 % -> 37.5 USDT
-  - dca:        40 % -> 30.0 USDT
-  - reserve:    10 % ->  7.5 USDT
+  - prediction: 35 % -> 26.25 USDT
+  - dca:        20 % -> 15.00 USDT
+  - momentum:   35 % -> 26.25 USDT
+  - reserve:    10 % ->  7.50 USDT
 """
 
 from __future__ import annotations
@@ -27,8 +28,9 @@ ALLOCATION_FILE = DATA_DIR / "allocation.json"
 
 # Porcentajes por defecto
 DEFAULT_ALLOCATION = {
-    "prediction": 0.50,
-    "dca": 0.40,
+    "prediction": 0.35,
+    "dca": 0.20,
+    "momentum": 0.35,
     "reserve": 0.10,
 }
 

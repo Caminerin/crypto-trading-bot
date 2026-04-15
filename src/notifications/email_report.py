@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from src.config import DEFAULT_ASSET_POLICIES, EmailConfig
+from src.config import DEFAULT_ASSET_POLICIES, DEFAULT_MOMENTUM_POLICIES, EmailConfig
 from src.execution.executor import ExecutionResult
 from src.strategies.dca import DCAAction
 from src.utils.logger import get_logger
@@ -34,6 +34,7 @@ def send_daily_report(
     dca_summary: dict[str, object] | None = None,
     allocation_budgets: dict[str, float] | None = None,
     dca_actions: list[DCAAction] | None = None,
+    momentum_summary: dict[str, object] | None = None,
 ) -> bool:
     """Envia el reporte diario por email.
 
@@ -61,6 +62,7 @@ def send_daily_report(
         dca_summary=dca_summary or {},
         allocation_budgets=allocation_budgets or {},
         dca_actions=dca_actions or [],
+        momentum_summary=momentum_summary or {},
     )
 
     mailjet = MailjetClient(
@@ -265,6 +267,113 @@ def _build_dca_section(
     )
 
 
+def _build_momentum_policy_table() -> str:
+    """Genera la tabla HTML con la politica Momentum por moneda."""
+    _cell = 'style="padding:6px;border:1px solid #ddd;text-align:center"'
+    rows = ""
+    for symbol, policy in sorted(DEFAULT_MOMENTUM_POLICIES.items()):
+        coin = symbol.replace("USDT", "")
+        rows += (
+            "<tr>"
+            f"<td {_cell}><strong>{coin}</strong></td>"
+            f"<td {_cell}>+{policy.momentum_threshold:.0%}</td>"
+            f"<td {_cell}>+{policy.take_profit_pct:.0%}</td>"
+            f"<td {_cell}>{policy.stop_loss_pct:.0%}</td>"
+            f"<td {_cell}>{policy.trend_days}d</td>"
+            "</tr>"
+        )
+    return (
+        '<h3 style="margin-top:15px">Politica Momentum por Moneda</h3>'
+        '<table style="border-collapse:collapse;width:100%">'
+        '<tr style="background:#f8f9fa">'
+        '<th style="padding:6px;border:1px solid #ddd">Moneda</th>'
+        '<th style="padding:6px;border:1px solid #ddd">Umbral</th>'
+        '<th style="padding:6px;border:1px solid #ddd">Take-Profit</th>'
+        '<th style="padding:6px;border:1px solid #ddd">Stop-Loss</th>'
+        '<th style="padding:6px;border:1px solid #ddd">Trend Days</th>'
+        "</tr>"
+        f"{rows}"
+        "</table>"
+    )
+
+
+def _build_momentum_section(momentum_summary: dict[str, object]) -> str:
+    """Genera la seccion HTML de Momentum para el email."""
+    if not momentum_summary:
+        return ""
+
+    budget = momentum_summary.get("budget", 0)
+    invested = momentum_summary.get("invested", 0)
+    free = momentum_summary.get("free", 0)
+    total_pnl = momentum_summary.get("total_pnl", 0)
+    positions = momentum_summary.get("positions", [])
+
+    pnl_color = "#28a745" if float(str(total_pnl)) >= 0 else "#dc3545"
+    pnl_sign = "+" if float(str(total_pnl)) >= 0 else ""
+
+    pos_rows = ""
+    for p in positions:
+        p_pnl = p.get("pnl", 0)
+        p_pnl_pct = p.get("pnl_pct", 0)
+        p_color = "#28a745" if p_pnl >= 0 else "#dc3545"
+        p_sign = "+" if p_pnl >= 0 else ""
+        days = _days_held(p.get("entry_date", ""))
+        days_label = f"{days}d" if days > 0 else "hoy"
+        pos_rows += (
+            "<tr>"
+            f'<td style="padding:6px;border:1px solid #ddd">'
+            f'{p.get("symbol", "").replace("USDT", "")}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd">${p.get("entry_price", 0):,.2f}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd">${p.get("current_price", 0):,.2f}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd">${p.get("invested", 0):,.2f}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd">${p.get("current_value", 0):,.2f}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd;color:{p_color};font-weight:bold">'
+            f'{p_sign}${p_pnl:,.2f} ({p_sign}{p_pnl_pct:.1f}%)</td>'
+            f'<td style="padding:6px;border:1px solid #ddd;text-align:center">{days_label}</td>'
+            "</tr>"
+        )
+
+    if not positions:
+        pos_table = "<p>Sin posiciones Momentum abiertas. Esperando subidas fuertes.</p>"
+    else:
+        pos_table = (
+            '<table style="border-collapse:collapse;width:100%">'
+            '<tr style="background:#f8f9fa">'
+            '<th style="padding:6px;border:1px solid #ddd">Moneda</th>'
+            '<th style="padding:6px;border:1px solid #ddd">Precio compra</th>'
+            '<th style="padding:6px;border:1px solid #ddd">Precio actual</th>'
+            '<th style="padding:6px;border:1px solid #ddd">Invertido</th>'
+            '<th style="padding:6px;border:1px solid #ddd">Valor actual</th>'
+            '<th style="padding:6px;border:1px solid #ddd">P&amp;L</th>'
+            '<th style="padding:6px;border:1px solid #ddd">Dias</th>'
+            "</tr>"
+            f"{pos_rows}"
+            "</table>"
+        )
+
+    return (
+        '<h2>Momentum (BTC + ETH + BNB + SOL + XRP)</h2>'
+        '<table style="border-collapse:collapse;width:100%;margin-bottom:10px">'
+        "<tr>"
+        f'<td style="padding:6px;border:1px solid #ddd"><strong>Presupuesto Momentum</strong></td>'
+        f'<td style="padding:6px;border:1px solid #ddd">${float(str(budget)):,.2f}</td>'
+        "</tr><tr>"
+        f'<td style="padding:6px;border:1px solid #ddd"><strong>Invertido</strong></td>'
+        f'<td style="padding:6px;border:1px solid #ddd">${float(str(invested)):,.2f}</td>'
+        "</tr><tr>"
+        f'<td style="padding:6px;border:1px solid #ddd"><strong>Disponible</strong></td>'
+        f'<td style="padding:6px;border:1px solid #ddd">${float(str(free)):,.2f}</td>'
+        "</tr><tr>"
+        f'<td style="padding:6px;border:1px solid #ddd"><strong>P&amp;L Momentum</strong></td>'
+        f'<td style="padding:6px;border:1px solid #ddd;color:{pnl_color};font-weight:bold">'
+        f'{pnl_sign}${float(str(total_pnl)):,.2f}</td>'
+        "</tr>"
+        "</table>"
+        f"{pos_table}"
+        f"{_build_momentum_policy_table()}"
+    )
+
+
 def _build_allocation_section(budgets: dict[str, float]) -> str:
     """Genera la seccion HTML de asignacion de cartera para el email."""
     if not budgets:
@@ -272,10 +381,16 @@ def _build_allocation_section(budgets: dict[str, float]) -> str:
 
     total = sum(budgets.values())
     rows = ""
-    colors = {"prediction": "#007bff", "dca": "#28a745", "reserve": "#6c757d"}
+    colors = {
+        "prediction": "#007bff",
+        "dca": "#28a745",
+        "momentum": "#fd7e14",
+        "reserve": "#6c757d",
+    }
     labels = {
-        "prediction": "Prediccion (50%)",
-        "dca": "DCA Inteligente (40%)",
+        "prediction": "Prediccion (35%)",
+        "dca": "DCA Inteligente (20%)",
+        "momentum": "Momentum (35%)",
         "reserve": "Reserva (10%)",
     }
 
@@ -323,6 +438,7 @@ def _build_html_body(
     dca_summary: dict[str, object] | None = None,
     allocation_budgets: dict[str, float] | None = None,
     dca_actions: list[DCAAction] | None = None,
+    momentum_summary: dict[str, object] | None = None,
 ) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     pnl = total_value_after - total_value_before
@@ -439,6 +555,7 @@ def _build_html_body(
         f"<h2>Operaciones Ejecutadas ({len(results)})</h2>"
         f"{ops_section}"
         f"{_build_dca_section(dca_summary or {}, dca_actions or [])}"
+        f"{_build_momentum_section(momentum_summary or {})}"
         f"{_build_allocation_section(allocation_budgets or {})}"
         "<h2>Top 20 Predicciones</h2>"
         f"{preds_section}"
