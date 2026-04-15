@@ -28,6 +28,8 @@ def send_daily_report(
     results: list[ExecutionResult],
     predictions: dict[str, float],
     is_paper: bool,
+    dca_summary: dict[str, object] | None = None,
+    allocation_budgets: dict[str, float] | None = None,
 ) -> bool:
     """Envia el reporte diario por email.
 
@@ -52,6 +54,8 @@ def send_daily_report(
         results=results,
         predictions=predictions,
         is_paper=is_paper,
+        dca_summary=dca_summary or {},
+        allocation_budgets=allocation_budgets or {},
     )
 
     mailjet = MailjetClient(
@@ -96,6 +100,124 @@ def _build_subject(
     )
 
 
+def _build_dca_section(dca_summary: dict[str, object]) -> str:
+    """Genera la seccion HTML del DCA Inteligente para el email."""
+    if not dca_summary:
+        return ""
+
+    budget = dca_summary.get("budget", 0)
+    invested = dca_summary.get("invested", 0)
+    free = dca_summary.get("free", 0)
+    total_pnl = dca_summary.get("total_pnl", 0)
+    positions = dca_summary.get("positions", [])
+
+    pnl_color = "#28a745" if float(str(total_pnl)) >= 0 else "#dc3545"
+    pnl_sign = "+" if float(str(total_pnl)) >= 0 else ""
+
+    pos_rows = ""
+    for p in positions:
+        p_pnl = p.get("pnl", 0)
+        p_pnl_pct = p.get("pnl_pct", 0)
+        p_color = "#28a745" if p_pnl >= 0 else "#dc3545"
+        p_sign = "+" if p_pnl >= 0 else ""
+        pos_rows += (
+            "<tr>"
+            f'<td style="padding:6px;border:1px solid #ddd">{p.get("symbol", "")}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd">${p.get("entry_price", 0):,.2f}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd">${p.get("current_price", 0):,.2f}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd">${p.get("invested", 0):,.2f}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd">${p.get("current_value", 0):,.2f}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd;color:{p_color};font-weight:bold">'
+            f'{p_sign}${p_pnl:,.2f} ({p_sign}{p_pnl_pct:.1f}%)</td>'
+            "</tr>"
+        )
+
+    if not positions:
+        pos_table = "<p>Sin posiciones DCA abiertas. Esperando caidas para comprar.</p>"
+    else:
+        pos_table = (
+            '<table style="border-collapse:collapse;width:100%">'
+            '<tr style="background:#f8f9fa">'
+            '<th style="padding:6px;border:1px solid #ddd">Moneda</th>'
+            '<th style="padding:6px;border:1px solid #ddd">Precio compra</th>'
+            '<th style="padding:6px;border:1px solid #ddd">Precio actual</th>'
+            '<th style="padding:6px;border:1px solid #ddd">Invertido</th>'
+            '<th style="padding:6px;border:1px solid #ddd">Valor actual</th>'
+            '<th style="padding:6px;border:1px solid #ddd">P&amp;L</th>'
+            "</tr>"
+            f"{pos_rows}"
+            "</table>"
+        )
+
+    return (
+        '<h2>DCA Inteligente (BTC + ETH)</h2>'
+        '<table style="border-collapse:collapse;width:100%;margin-bottom:10px">'
+        "<tr>"
+        f'<td style="padding:6px;border:1px solid #ddd"><strong>Presupuesto DCA</strong></td>'
+        f'<td style="padding:6px;border:1px solid #ddd">${float(str(budget)):,.2f}</td>'
+        "</tr><tr>"
+        f'<td style="padding:6px;border:1px solid #ddd"><strong>Invertido</strong></td>'
+        f'<td style="padding:6px;border:1px solid #ddd">${float(str(invested)):,.2f}</td>'
+        "</tr><tr>"
+        f'<td style="padding:6px;border:1px solid #ddd"><strong>Disponible</strong></td>'
+        f'<td style="padding:6px;border:1px solid #ddd">${float(str(free)):,.2f}</td>'
+        "</tr><tr>"
+        f'<td style="padding:6px;border:1px solid #ddd"><strong>P&amp;L DCA</strong></td>'
+        f'<td style="padding:6px;border:1px solid #ddd;color:{pnl_color};font-weight:bold">'
+        f'{pnl_sign}${float(str(total_pnl)):,.2f}</td>'
+        "</tr>"
+        "</table>"
+        f"{pos_table}"
+    )
+
+
+def _build_allocation_section(budgets: dict[str, float]) -> str:
+    """Genera la seccion HTML de asignacion de cartera para el email."""
+    if not budgets:
+        return ""
+
+    total = sum(budgets.values())
+    rows = ""
+    colors = {"prediction": "#007bff", "dca": "#28a745", "reserve": "#6c757d"}
+    labels = {
+        "prediction": "Prediccion (50%)",
+        "dca": "DCA Inteligente (40%)",
+        "reserve": "Reserva (10%)",
+    }
+
+    for strategy, amount in budgets.items():
+        pct = (amount / total * 100) if total > 0 else 0
+        color = colors.get(strategy, "#333")
+        label = labels.get(strategy, strategy)
+        rows += (
+            "<tr>"
+            f'<td style="padding:6px;border:1px solid #ddd">{label}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd">${amount:,.2f}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd">'
+            f'<div style="background:#eee;border-radius:4px;overflow:hidden;width:150px">'
+            f'<div style="background:{color};height:14px;width:{pct:.0f}%"></div>'
+            f'</div></td>'
+            "</tr>"
+        )
+
+    return (
+        '<h2>Distribucion de Cartera</h2>'
+        '<table style="border-collapse:collapse;width:100%">'
+        '<tr style="background:#f8f9fa">'
+        '<th style="padding:6px;border:1px solid #ddd">Estrategia</th>'
+        '<th style="padding:6px;border:1px solid #ddd">Asignado</th>'
+        '<th style="padding:6px;border:1px solid #ddd">%</th>'
+        "</tr>"
+        f"{rows}"
+        f'<tr style="font-weight:bold">'
+        f'<td style="padding:6px;border:1px solid #ddd">Total</td>'
+        f'<td style="padding:6px;border:1px solid #ddd">${total:,.2f}</td>'
+        f'<td style="padding:6px;border:1px solid #ddd">100%</td>'
+        "</tr>"
+        "</table>"
+    )
+
+
 def _build_html_body(
     portfolio_before: dict[str, float],
     portfolio_after: dict[str, float],
@@ -104,6 +226,8 @@ def _build_html_body(
     results: list[ExecutionResult],
     predictions: dict[str, float],
     is_paper: bool,
+    dca_summary: dict[str, object] | None = None,
+    allocation_budgets: dict[str, float] | None = None,
 ) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     pnl = total_value_after - total_value_before
@@ -219,6 +343,8 @@ def _build_html_body(
         "</table>"
         f"<h2>Operaciones Ejecutadas ({len(results)})</h2>"
         f"{ops_section}"
+        f"{_build_dca_section(dca_summary or {})}"
+        f"{_build_allocation_section(allocation_budgets or {})}"
         "<h2>Top 20 Predicciones</h2>"
         f"{preds_section}"
         "<h2>Cartera Actual</h2>"

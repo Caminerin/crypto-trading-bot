@@ -57,6 +57,26 @@ class RiskConfig:
 
 
 @dataclass(frozen=True)
+class DCAConfig:
+    """Parametros de la estrategia DCA Inteligente."""
+
+    enabled: bool = True
+    assets: tuple[str, ...] = ("BTCUSDT", "ETHUSDT")
+    dip_threshold: float = -0.05    # Compra cuando cae >5% en 24h
+    take_profit_pct: float = 0.15   # Vende cuando sube 15%
+    min_order_usdt: float = 10.0
+
+
+@dataclass(frozen=True)
+class AllocationConfig:
+    """Reparto del balance entre estrategias (virtual wallets)."""
+
+    prediction_pct: float = 0.50   # 50% para bot de prediccion
+    dca_pct: float = 0.40          # 40% para DCA inteligente
+    reserve_pct: float = 0.10      # 10% reserva intocable
+
+
+@dataclass(frozen=True)
 class EmailConfig:
     mailjet_api_key: str = os.getenv("MAILJET_API_KEY", "")
     mailjet_api_secret: str = os.getenv("MAILJET_API_SECRET", "")
@@ -74,6 +94,8 @@ class AppConfig:
     portfolio: PortfolioConfig = field(default_factory=PortfolioConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
+    dca: DCAConfig = field(default_factory=DCAConfig)
+    allocation: AllocationConfig = field(default_factory=AllocationConfig)
 
     @property
     def is_paper_trading(self) -> bool:
