@@ -1,0 +1,147 @@
+# Auto-optimización mensual de estrategias DCA y Momentum.
+#
+# Ejecuta backtesting con los últimos 365 días, encuentra la mejor
+# configuración por moneda que cumpla filtros de calidad, y si hay
+# mejora, actualiza src/config.py y hace commit + push automático.
+#
+# Filtros: P&L >5%, Trades >=5, Win rate >=40%, Max DD <20%
+# Si ninguna config pasa los filtros, no se cambia nada.
+
+name: Monthly Strategy Optimize
+
+on:
+  schedule:
+    - cron: "0 3 1 * *"   # Día 1 de cada mes a las 03:00 UTC
+  workflow_dispatch:
+    # Permite ejecución manual desde la UI de GitHub
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install pandas requests
+
+      - name: Run auto-optimizer
+        id: optimize
+        continue-on-error: true
+        run: |
+          cd scripts && python3 auto_optimize.py --days 365 --budget 30 2>&1 | tee ../optimize_output.txt
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Check for config changes
+        id: changes
+        run: |
+          if git diff --quiet src/config.py; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No hay cambios en config.py"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Config.py actualizado:"
+            git diff src/config.py
+          fi
+
+      - name: Commit and push changes
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add src/config.py
+          git commit -m "chore: auto-optimización mensual de estrategias DCA/Momentum
+
+          Actualización automática basada en backtesting de los últimos 365 días.
+          Filtros: P&L >5%, Trades >=5, Win rate >=40%, Max DD <20%."
+          git push
+
+      - name: Send notification email
+        if: always()
+        env:
+          MAILJET_API_KEY: ${{ secrets.MAILJET_API_KEY }}
+          MAILJET_API_SECRET: ${{ secrets.MAILJET_API_SECRET }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: |
+          python3 << 'PYEOF'
+          import os, json, requests
+
+          api_key = os.getenv("MAILJET_API_KEY", "")
+          api_secret = os.getenv("MAILJET_API_SECRET", "")
+          email_from = os.getenv("EMAIL_FROM", "")
+          email_to = os.getenv("EMAIL_TO", "")
+
+          if not all([api_key, api_secret, email_from, email_to]):
+              print("Faltan credenciales de email, saltando notificación")
+              exit(0)
+
+          # Leer resultado
+          try:
+              output = open("optimize_output.txt").read()
+          except FileNotFoundError:
+              output = "No se pudo leer el resultado de la optimización."
+
+          changed = "${{ steps.changes.outputs.changed }}" == "true"
+          subject = (
+              "🔄 Bot: Estrategias actualizadas (auto-optimización)"
+              if changed
+              else "📊 Bot: Auto-optimización sin cambios"
+          )
+
+          html = f"""
+          <h2>{subject}</h2>
+          <p>{'Se han actualizado las políticas DCA/Momentum.' if changed
+              else 'Ninguna configuración nueva superó los filtros de calidad.'}</p>
+          <h3>Filtros aplicados:</h3>
+          <ul>
+            <li>P&amp;L &gt; 5%</li>
+            <li>Trades &gt;= 5</li>
+            <li>Win rate &gt;= 40%</li>
+            <li>Max drawdown &lt; 20%</li>
+          </ul>
+          <h3>Resultado completo:</h3>
+          <pre style="background:#f5f5f5;padding:10px;font-size:12px;overflow:auto">
+          {output[-3000:]}
+          </pre>
+          <p><small>Auto-optimización mensual — Crypto Trading Bot</small></p>
+          """
+
+          data = {
+              "Messages": [{
+                  "From": {"Email": email_from, "Name": "Crypto Bot"},
+                  "To": [{"Email": email_to}],
+                  "Subject": subject,
+                  "HTMLPart": html,
+              }]
+          }
+
+          try:
+              r = requests.post(
+                  "https://api.mailjet.com/v3.1/send",
+                  auth=(api_key, api_secret),
+                  json=data,
+                  timeout=15,
+              )
+              print(f"Email enviado: {r.status_code}")
+          except Exception as e:
+              print(f"Error enviando email: {e}")
+          PYEOF
+
+      - name: Upload optimization report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: optimize-report-${{ github.run_number }}
+          path: optimize_output.txt
+          retention-days: 90
