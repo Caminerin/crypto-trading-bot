@@ -5,7 +5,7 @@ Backtesting de la estrategia DCA Inteligente v2.
 Descarga datos historicos de BTC, ETH, SOL, BNB y XRP desde Binance
 y simula la estrategia DCA con parametros personalizados por moneda.
 
-Regla: TP = 3x umbral de compra, SL = 2x umbral de compra.
+Regla: TP = 3x umbral de compra, SL = 1.5x umbral de compra.
 
 Uso:
     python3 scripts/backtest_dca.py [--days 365] [--budget 30]
@@ -29,28 +29,28 @@ import requests
 ASSET_CONFIGS: dict[str, dict[str, float]] = {
     "BTCUSDT": {
         "dip_threshold": -0.03,   # Compra si cae >3%
-        "take_profit":    0.09,   # Vende al +9%  (3x de 3%)
-        "stop_loss":     -0.06,   # Corta al -6%  (2x de 3%)
+        "take_profit":    0.09,   # Vende al +9%   (3x de 3%)
+        "stop_loss":     -0.045,  # Corta al -4.5% (1.5x de 3%)
     },
     "ETHUSDT": {
-        "dip_threshold": -0.05,   # Compra si cae >5%
-        "take_profit":    0.15,   # Vende al +15% (3x de 5%)
-        "stop_loss":     -0.10,   # Corta al -10% (2x de 5%)
+        "dip_threshold": -0.07,   # Compra si cae >7%
+        "take_profit":    0.21,   # Vende al +21%   (3x de 7%)
+        "stop_loss":     -0.105,  # Corta al -10.5% (1.5x de 7%)
     },
     "SOLUSDT": {
-        "dip_threshold": -0.05,   # Compra si cae >5%
-        "take_profit":    0.15,   # Vende al +15% (3x de 5%)
-        "stop_loss":     -0.10,   # Corta al -10% (2x de 5%)
+        "dip_threshold": -0.07,   # Compra si cae >7%
+        "take_profit":    0.21,   # Vende al +21%   (3x de 7%)
+        "stop_loss":     -0.105,  # Corta al -10.5% (1.5x de 7%)
     },
     "BNBUSDT": {
         "dip_threshold": -0.03,   # Compra si cae >3%
-        "take_profit":    0.09,   # Vende al +9%  (3x de 3%)
-        "stop_loss":     -0.06,   # Corta al -6%  (2x de 3%)
+        "take_profit":    0.09,   # Vende al +9%   (3x de 3%)
+        "stop_loss":     -0.045,  # Corta al -4.5% (1.5x de 3%)
     },
     "XRPUSDT": {
-        "dip_threshold": -0.05,   # Compra si cae >5%
-        "take_profit":    0.15,   # Vende al +15% (3x de 5%)
-        "stop_loss":     -0.10,   # Corta al -10% (2x de 5%)
+        "dip_threshold": -0.07,   # Compra si cae >7%
+        "take_profit":    0.21,   # Vende al +21%   (3x de 7%)
+        "stop_loss":     -0.105,  # Corta al -10.5% (1.5x de 7%)
     },
 }
 
@@ -374,13 +374,13 @@ def print_report(result: BacktestResult, days: int) -> str:
     lines = [
         "",
         "=" * 65,
-        "  BACKTESTING DCA INTELIGENTE v2 - RESULTADOS",
+        "  BACKTESTING DCA INTELIGENTE v3 - RESULTADOS",
         "=" * 65,
         "",
         f"  Periodo:           Ultimos {days} dias",
         f"  Presupuesto:       ${result.initial_budget:,.2f} USDT",
         "",
-        "  Configuracion por moneda (Regla: TP=3x, SL=2x):",
+        "  Configuracion por moneda (Regla: TP=3x, SL=1.5x):",
     ]
 
     for symbol, cfg in ASSET_CONFIGS.items():
