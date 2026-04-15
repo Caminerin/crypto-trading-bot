@@ -75,22 +75,37 @@ class MomentumAssetPolicy:
     trend_days: int = 7        # Días para confirmar tendencia alcista
 
 
-# Política óptima momentum por moneda
+# Política óptima momentum por moneda (backtested 730d, 5472 combos)
 DEFAULT_MOMENTUM_POLICIES: dict[str, MomentumAssetPolicy] = {
     "BTCUSDT": MomentumAssetPolicy(
         momentum_threshold=0.05,
         take_profit_pct=0.10,
         stop_loss_pct=-0.05,
+        trend_days=3,
     ),
     "ETHUSDT": MomentumAssetPolicy(
-        momentum_threshold=0.07,
-        take_profit_pct=0.10,
-        stop_loss_pct=-0.05,
+        momentum_threshold=0.03,
+        take_profit_pct=0.05,
+        stop_loss_pct=-0.03,
+        trend_days=14,
     ),
     "BNBUSDT": MomentumAssetPolicy(
-        momentum_threshold=0.07,
+        momentum_threshold=0.03,
+        take_profit_pct=0.25,
+        stop_loss_pct=-0.03,
+        trend_days=5,
+    ),
+    "SOLUSDT": MomentumAssetPolicy(
+        momentum_threshold=0.03,
         take_profit_pct=0.10,
-        stop_loss_pct=-0.05,
+        stop_loss_pct=-0.03,
+        trend_days=7,
+    ),
+    "XRPUSDT": MomentumAssetPolicy(
+        momentum_threshold=0.03,
+        take_profit_pct=0.25,
+        stop_loss_pct=-0.03,
+        trend_days=14,
     ),
 }
 
@@ -133,7 +148,7 @@ class MomentumConfig:
     """Parámetros de la estrategia Momentum."""
 
     enabled: bool = False
-    assets: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "BNBUSDT")
+    assets: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")
     # Parámetros globales (fallback si no hay política por moneda)
     momentum_threshold: float = 0.05
     take_profit_pct: float = 0.10
