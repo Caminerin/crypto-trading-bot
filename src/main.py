@@ -4,11 +4,10 @@ Orquestador principal del bot de trading.
 Este es el punto de entrada.  Coordina todos los módulos:
 1. Carga configuración.
 2. Conecta con Binance.
-3. Obtiene datos de las top 50 monedas por liquidez.
-4. Ejecuta (o entrena) el modelo predictivo.
-5. Decide qué comprar/vender.
-6. Ejecuta las órdenes.
-7. Envía el reporte por email.
+3. Inicializa el asignador de cartera (virtual wallets).
+4. Ejecuta la estrategia de PREDICCION (50% del balance).
+5. Ejecuta la estrategia DCA Inteligente (40% del balance).
+6. Envía el reporte por email (incluye ambas estrategias).
 """
 
 from __future__ import annotations
@@ -19,12 +18,14 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from src.allocation.allocator import PortfolioAllocator
 from src.config import MODELS_DIR, AppConfig, load_config
 from src.data.binance_client import BinanceDataClient, BinanceTradingClient
 from src.execution.executor import OrderExecutor
 from src.model.predictor import PricePredictor
 from src.notifications.email_report import send_daily_report
-from src.portfolio.manager import PortfolioManager
+from src.portfolio.manager import PortfolioManager, TradeAction
+from src.strategies.dca import DCAAction, DCAStrategy
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -33,7 +34,7 @@ MODEL_FILE = MODELS_DIR / "predictor.joblib"
 
 
 def run_daily(config: AppConfig | None = None) -> None:
-    """Ejecución diaria completa del bot."""
+    """Ejecución diaria completa del bot (predicción + DCA)."""
     config = config or load_config()
     logger.info("=" * 60)
     now = datetime.now(timezone.utc).isoformat()
@@ -92,7 +93,27 @@ def run_daily(config: AppConfig | None = None) -> None:
             total_value_before = 1000.0
 
     # ------------------------------------------------------------------
-    # 3. Obtener top monedas y descargar datos
+    # 3. Inicializar asignador de cartera (virtual wallets)
+    # ------------------------------------------------------------------
+    alloc_pcts = {
+        "prediction": config.allocation.prediction_pct,
+        "dca": config.allocation.dca_pct,
+        "reserve": config.allocation.reserve_pct,
+    }
+    allocator = PortfolioAllocator(alloc_pcts)
+    if not allocator.is_initialized:
+        allocator.initialize(total_value_before)
+
+    budgets = allocator.get_all_budgets()
+    logger.info(
+        "Asignacion: prediccion=$%.2f | dca=$%.2f | reserva=$%.2f",
+        budgets.get("prediction", 0),
+        budgets.get("dca", 0),
+        budgets.get("reserve", 0),
+    )
+
+    # ------------------------------------------------------------------
+    # 4. Obtener top monedas y descargar datos
     # ------------------------------------------------------------------
     top_symbols: list[str] = []
     klines: dict[str, pd.DataFrame] = {}
@@ -126,7 +147,7 @@ def run_daily(config: AppConfig | None = None) -> None:
         )
 
     # ------------------------------------------------------------------
-    # 4. Entrenar o cargar modelo
+    # 5. Entrenar o cargar modelo
     # ------------------------------------------------------------------
     model_ready = False
     if klines and _should_retrain(config):
@@ -157,7 +178,7 @@ def run_daily(config: AppConfig | None = None) -> None:
         )
 
     # ------------------------------------------------------------------
-    # 5. Predecir
+    # 6. ESTRATEGIA 1: Predicciones (usa budget "prediction")
     # ------------------------------------------------------------------
     predictions: dict[str, float] = {}
     recommendations: list[tuple[str, float]] = []
@@ -183,9 +204,8 @@ def run_daily(config: AppConfig | None = None) -> None:
             len(klines),
         )
 
-    # ------------------------------------------------------------------
-    # 6. Decidir acciones
-    # ------------------------------------------------------------------
+    # Decidir acciones de prediccion (limitadas al budget de prediccion)
+    prediction_budget = allocator.get_budget("prediction")
     current_prices: dict[str, float] = {}
     for sym, _ in recommendations:
         try:
@@ -195,22 +215,79 @@ def run_daily(config: AppConfig | None = None) -> None:
 
     actions = portfolio_mgr.decide_actions(
         current_portfolio=portfolio_before,
-        total_value_usdt=total_value_before,
+        total_value_usdt=prediction_budget,
         recommendations=recommendations,
         current_prices=current_prices,
     )
-    logger.info("Acciones decididas: %d", len(actions))
+    logger.info("Acciones prediccion: %d", len(actions))
     for a in actions:
         logger.info("  %s %s | %s", a.action, a.symbol, a.reason)
 
-    # ------------------------------------------------------------------
-    # 7. Ejecutar órdenes
-    # ------------------------------------------------------------------
-    results = executor.execute(actions)
-    successful = sum(1 for r in results if r.success)
+    # Ejecutar ordenes de prediccion
+    pred_results = executor.execute(actions)
+    successful = sum(1 for r in pred_results if r.success)
     logger.info(
-        "Órdenes ejecutadas: %d/%d exitosas", successful, len(results),
+        "Ordenes prediccion: %d/%d exitosas", successful, len(pred_results),
     )
+
+    # ------------------------------------------------------------------
+    # 7. ESTRATEGIA 2: DCA Inteligente (usa budget "dca")
+    # ------------------------------------------------------------------
+    dca_summary: dict = {}
+
+    if config.dca.enabled:
+        logger.info("=" * 40)
+        logger.info("ESTRATEGIA DCA INTELIGENTE")
+        logger.info("=" * 40)
+
+        dca_budget = allocator.get_budget("dca")
+        dca_strategy = DCAStrategy(
+            budget_usdt=dca_budget,
+            dip_threshold=config.dca.dip_threshold,
+            take_profit_pct=config.dca.take_profit_pct,
+            assets=list(config.dca.assets),
+        )
+
+        # Obtener cambios de precio 24h y precios actuales para activos DCA
+        price_changes_24h: dict[str, float] = {}
+        dca_prices: dict[str, float] = {}
+        try:
+            dca_prices = _get_dca_prices(data_client, list(config.dca.assets))
+            price_changes_24h = _get_24h_changes(data_client, list(config.dca.assets))
+        except Exception as exc:
+            logger.warning("Error obteniendo datos DCA: %s", exc)
+
+        # Evaluar y generar acciones DCA
+        dca_actions = dca_strategy.evaluate(price_changes_24h, dca_prices)
+        logger.info("Acciones DCA: %d", len(dca_actions))
+
+        # Ejecutar acciones DCA
+        for dca_action in dca_actions:
+            if is_paper:
+                logger.info(
+                    "[PAPER DCA] %s %s | $%.2f | reason=%s",
+                    dca_action.action, dca_action.symbol,
+                    dca_action.quote_qty, dca_action.reason,
+                )
+                if dca_action.action == "BUY":
+                    price = dca_prices.get(dca_action.symbol, 0)
+                    if price > 0:
+                        qty = dca_action.quote_qty / price
+                        dca_strategy.record_buy(
+                            dca_action.symbol, price, qty, dca_action.quote_qty,
+                        )
+                elif dca_action.action == "SELL":
+                    dca_strategy.record_sell(dca_action.symbol)
+            else:
+                _execute_dca_live(
+                    dca_action, executor, dca_strategy, allocator, dca_prices,
+                )
+
+        # Resumen DCA para el email
+        dca_summary = dca_strategy.get_summary(dca_prices)
+        logger.info("DCA resumen: %s", dca_summary)
+    else:
+        logger.info("DCA deshabilitado en configuracion.")
 
     # ------------------------------------------------------------------
     # 8. Estado final de la cartera
@@ -226,6 +303,15 @@ def run_daily(config: AppConfig | None = None) -> None:
 
     logger.info("Balance final: $%.2f", total_value_after)
 
+    # Actualizar budgets del allocator con el valor real
+    if not is_paper and total_value_after != total_value_before:
+        pnl = total_value_after - total_value_before
+        pred_share = config.allocation.prediction_pct / (
+            config.allocation.prediction_pct + config.allocation.dca_pct
+        )
+        allocator.add_profit("prediction", pnl * pred_share)
+        allocator.add_profit("dca", pnl * (1 - pred_share))
+
     # ------------------------------------------------------------------
     # 9. Enviar reporte
     # ------------------------------------------------------------------
@@ -235,9 +321,11 @@ def run_daily(config: AppConfig | None = None) -> None:
         portfolio_after=portfolio_after,
         total_value_before=total_value_before,
         total_value_after=total_value_after,
-        results=results,
+        results=pred_results,
         predictions=predictions,
         is_paper=is_paper,
+        dca_summary=dca_summary,
+        allocation_budgets=allocator.get_all_budgets(),
     )
     if email_sent:
         logger.info("Reporte enviado por email")
@@ -247,6 +335,84 @@ def run_daily(config: AppConfig | None = None) -> None:
     logger.info("=" * 60)
     logger.info("FIN — %s", datetime.now(timezone.utc).isoformat())
     logger.info("=" * 60)
+
+
+def _get_dca_prices(
+    data_client: BinanceDataClient, symbols: list[str],
+) -> dict[str, float]:
+    """Obtiene precios actuales para los activos DCA."""
+    prices: dict[str, float] = {}
+    for symbol in symbols:
+        try:
+            prices[symbol] = data_client.get_current_price(symbol)
+        except Exception as exc:
+            logger.warning("Error obteniendo precio de %s: %s", symbol, exc)
+    return prices
+
+
+def _get_24h_changes(
+    data_client: BinanceDataClient, symbols: list[str],
+) -> dict[str, float]:
+    """Calcula el cambio porcentual de precio en las ultimas 24h."""
+    changes: dict[str, float] = {}
+    for symbol in symbols:
+        try:
+            klines = data_client.get_klines(symbol, interval="1h", lookback_hours=25)
+            if len(klines) >= 2:
+                price_24h_ago = float(klines.iloc[0]["close"])
+                price_now = float(klines.iloc[-1]["close"])
+                if price_24h_ago > 0:
+                    changes[symbol] = (price_now - price_24h_ago) / price_24h_ago
+                    logger.info(
+                        "DCA %s cambio 24h: %.2f%% ($%.2f -> $%.2f)",
+                        symbol, changes[symbol] * 100,
+                        price_24h_ago, price_now,
+                    )
+        except Exception as exc:
+            logger.warning("Error calculando cambio 24h de %s: %s", symbol, exc)
+    return changes
+
+
+def _execute_dca_live(
+    dca_action: DCAAction,
+    executor: OrderExecutor,
+    dca_strategy: DCAStrategy,
+    allocator: PortfolioAllocator,
+    dca_prices: dict[str, float],
+) -> None:
+    """Ejecuta una accion DCA en modo live."""
+    # Convertir DCAAction en TradeAction para reutilizar el executor
+    trade = TradeAction(
+        action=dca_action.action,
+        symbol=dca_action.symbol,
+        quote_qty=dca_action.quote_qty,
+        base_qty=dca_action.base_qty,
+        reason=dca_action.reason,
+        probability=0.0,
+    )
+    results = executor.execute([trade])
+
+    if results and results[0].success:
+        result = results[0]
+        if dca_action.action == "BUY":
+            dca_strategy.record_buy(
+                symbol=dca_action.symbol,
+                price=result.executed_price,
+                quantity=result.executed_qty,
+                usdt_spent=dca_action.quote_qty,
+            )
+        elif dca_action.action == "SELL":
+            freed = dca_strategy.record_sell(dca_action.symbol)
+            price = dca_prices.get(dca_action.symbol, 0)
+            if price > 0 and result.executed_qty > 0:
+                sell_value = result.executed_qty * result.executed_price
+                profit = sell_value - freed
+                allocator.add_profit("dca", profit)
+    else:
+        error = results[0].error if results else "Sin resultado"
+        logger.error(
+            "DCA %s %s fallo: %s", dca_action.action, dca_action.symbol, error,
+        )
 
 
 def run_train_only(config: AppConfig | None = None) -> None:

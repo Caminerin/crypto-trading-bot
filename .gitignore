@@ -28,6 +28,8 @@ logs/
 
 data/raw/
 data/processed/
+data/allocation.json
+data/dca_positions.json
 
 .idea/
 .vscode/
