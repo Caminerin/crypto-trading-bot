@@ -1,18 +1,20 @@
 """
-Generacion y envio de reportes por email via Mailjet.
+Generación y envío de reportes por email vía Mailjet.
 
 Construye un email HTML con:
-- Resumen de cartera (antes y despues).
+- Resumen de cartera (antes y después).
 - Operaciones ejecutadas.
+- Política DCA por moneda.
+- Acciones DCA del día.
+- Posiciones DCA con P&L y días en posición.
 - Predicciones del modelo.
-- P&L estimado.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from src.config import EmailConfig
+from src.config import DEFAULT_ASSET_POLICIES, EmailConfig
 from src.execution.executor import ExecutionResult
 from src.utils.logger import get_logger
 
@@ -30,10 +32,11 @@ def send_daily_report(
     is_paper: bool,
     dca_summary: dict[str, object] | None = None,
     allocation_budgets: dict[str, float] | None = None,
+    dca_actions: list[dict[str, object]] | None = None,
 ) -> bool:
-    """Envia el reporte diario por email.
+    """Envía el reporte diario por email.
 
-    Devuelve True si el envio fue exitoso.
+    Devuelve True si el envío fue exitoso.
     """
     if not config.mailjet_api_key or not config.mailjet_api_secret:
         logger.warning("Mailjet API key/secret no configuradas. No se envia email.")
@@ -56,6 +59,7 @@ def send_daily_report(
         is_paper=is_paper,
         dca_summary=dca_summary or {},
         allocation_budgets=allocation_budgets or {},
+        dca_actions=dca_actions or [],
     )
 
     mailjet = MailjetClient(
@@ -100,8 +104,124 @@ def _build_subject(
     )
 
 
-def _build_dca_section(dca_summary: dict[str, object]) -> str:
-    """Genera la seccion HTML del DCA Inteligente para el email."""
+def _build_dca_policies_section() -> str:
+    """Genera la sección HTML con la política DCA por moneda."""
+    if not DEFAULT_ASSET_POLICIES:
+        return ""
+
+    # Nombres legibles para los símbolos
+    coin_names = {
+        "BTCUSDT": "Bitcoin (BTC)",
+        "ETHUSDT": "Ethereum (ETH)",
+        "BNBUSDT": "BNB",
+    }
+
+    rows = ""
+    for symbol, policy in DEFAULT_ASSET_POLICIES.items():
+        name = coin_names.get(symbol, symbol)
+        rows += (
+            "<tr>"
+            f'<td style="padding:8px;border:1px solid #ddd">{name}</td>'
+            f'<td style="padding:8px;border:1px solid #ddd;text-align:center">'
+            f'{policy.dip_threshold * 100:.0f}%</td>'
+            f'<td style="padding:8px;border:1px solid #ddd;text-align:center;'
+            f'color:#28a745">+{policy.take_profit_pct * 100:.1f}%</td>'
+            f'<td style="padding:8px;border:1px solid #ddd;text-align:center;'
+            f'color:#dc3545">{policy.stop_loss_pct * 100:.1f}%</td>'
+            "</tr>"
+        )
+
+    return (
+        '<h2 style="color:#333;border-bottom:2px solid #007bff;padding-bottom:6px">'
+        "\U0001f4cb Política DCA por moneda</h2>"
+        '<p style="color:#666;margin-bottom:10px">'
+        "Parámetros optimizados por backtesting (365 días, 84 combinaciones/moneda)."
+        "</p>"
+        '<table style="border-collapse:collapse;width:100%">'
+        '<tr style="background:#e9ecef">'
+        '<th style="padding:8px;border:1px solid #ddd;text-align:left">Moneda</th>'
+        '<th style="padding:8px;border:1px solid #ddd;text-align:center">'
+        "Umbral de caída</th>"
+        '<th style="padding:8px;border:1px solid #ddd;text-align:center">'
+        "Take-Profit</th>"
+        '<th style="padding:8px;border:1px solid #ddd;text-align:center">'
+        "Stop-Loss</th>"
+        "</tr>"
+        f"{rows}"
+        "</table>"
+    )
+
+
+def _build_dca_actions_section(dca_actions: list[dict[str, object]]) -> str:
+    """Genera la sección HTML con las acciones DCA ejecutadas hoy."""
+    if not dca_actions:
+        return (
+            '<h2 style="color:#333;border-bottom:2px solid #007bff;padding-bottom:6px">'
+            "\u26a1 Acciones DCA hoy</h2>"
+            '<p style="color:#666">No se ejecutaron acciones DCA hoy. '
+            "Ninguna moneda alcanzó su umbral de caída, take-profit o stop-loss.</p>"
+        )
+
+    rows = ""
+    for act in dca_actions:
+        action = str(act.get("action", ""))
+        symbol = str(act.get("symbol", ""))
+        quote_qty = float(str(act.get("quote_qty", 0)))
+        reason = str(act.get("reason", ""))
+
+        if action == "BUY":
+            action_badge = (
+                '<span style="background:#28a745;color:#fff;padding:2px 8px;'
+                'border-radius:4px;font-weight:bold">COMPRA</span>'
+            )
+        else:
+            action_badge = (
+                '<span style="background:#dc3545;color:#fff;padding:2px 8px;'
+                'border-radius:4px;font-weight:bold">VENTA</span>'
+            )
+
+        rows += (
+            "<tr>"
+            f'<td style="padding:8px;border:1px solid #ddd">{action_badge}</td>'
+            f'<td style="padding:8px;border:1px solid #ddd">{symbol}</td>'
+            f'<td style="padding:8px;border:1px solid #ddd">'
+            f'{f"${quote_qty:,.2f}" if quote_qty > 0 else "—"}</td>'
+            f'<td style="padding:8px;border:1px solid #ddd;font-size:13px">{reason}</td>'
+            "</tr>"
+        )
+
+    return (
+        '<h2 style="color:#333;border-bottom:2px solid #007bff;padding-bottom:6px">'
+        "\u26a1 Acciones DCA hoy</h2>"
+        '<table style="border-collapse:collapse;width:100%">'
+        '<tr style="background:#e9ecef">'
+        '<th style="padding:8px;border:1px solid #ddd">Acción</th>'
+        '<th style="padding:8px;border:1px solid #ddd">Moneda</th>'
+        '<th style="padding:8px;border:1px solid #ddd">Importe</th>'
+        '<th style="padding:8px;border:1px solid #ddd">Motivo</th>'
+        "</tr>"
+        f"{rows}"
+        "</table>"
+    )
+
+
+def _calculate_days_held(entry_date: str) -> int:
+    """Calcula los días transcurridos desde la fecha de entrada."""
+    try:
+        entry = datetime.fromisoformat(entry_date)
+        if entry.tzinfo is None:
+            entry = entry.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - entry
+        return max(delta.days, 0)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _build_dca_section(
+    dca_summary: dict[str, object],
+    dca_actions: list[dict[str, object]] | None = None,
+) -> str:
+    """Genera la sección HTML completa de DCA Inteligente para el email."""
     if not dca_summary:
         return ""
 
@@ -114,61 +234,92 @@ def _build_dca_section(dca_summary: dict[str, object]) -> str:
     pnl_color = "#28a745" if float(str(total_pnl)) >= 0 else "#dc3545"
     pnl_sign = "+" if float(str(total_pnl)) >= 0 else ""
 
+    # --- Tabla de posiciones mejorada (con días en posición) ---
     pos_rows = ""
     for p in positions:
         p_pnl = p.get("pnl", 0)
         p_pnl_pct = p.get("pnl_pct", 0)
         p_color = "#28a745" if p_pnl >= 0 else "#dc3545"
         p_sign = "+" if p_pnl >= 0 else ""
+        days = _calculate_days_held(str(p.get("entry_date", "")))
+        days_text = f"{days}d" if days > 0 else "<1d"
         pos_rows += (
             "<tr>"
-            f'<td style="padding:6px;border:1px solid #ddd">{p.get("symbol", "")}</td>'
-            f'<td style="padding:6px;border:1px solid #ddd">${p.get("entry_price", 0):,.2f}</td>'
-            f'<td style="padding:6px;border:1px solid #ddd">${p.get("current_price", 0):,.2f}</td>'
-            f'<td style="padding:6px;border:1px solid #ddd">${p.get("invested", 0):,.2f}</td>'
-            f'<td style="padding:6px;border:1px solid #ddd">${p.get("current_value", 0):,.2f}</td>'
-            f'<td style="padding:6px;border:1px solid #ddd;color:{p_color};font-weight:bold">'
+            f'<td style="padding:8px;border:1px solid #ddd">{p.get("symbol", "")}</td>'
+            f'<td style="padding:8px;border:1px solid #ddd;text-align:right">'
+            f'${p.get("entry_price", 0):,.2f}</td>'
+            f'<td style="padding:8px;border:1px solid #ddd;text-align:right">'
+            f'${p.get("current_price", 0):,.2f}</td>'
+            f'<td style="padding:8px;border:1px solid #ddd;text-align:right">'
+            f'${p.get("invested", 0):,.2f}</td>'
+            f'<td style="padding:8px;border:1px solid #ddd;text-align:right">'
+            f'${p.get("current_value", 0):,.2f}</td>'
+            f'<td style="padding:8px;border:1px solid #ddd;text-align:right;'
+            f'color:{p_color};font-weight:bold">'
             f'{p_sign}${p_pnl:,.2f} ({p_sign}{p_pnl_pct:.1f}%)</td>'
+            f'<td style="padding:8px;border:1px solid #ddd;text-align:center">'
+            f'{days_text}</td>'
             "</tr>"
         )
 
     if not positions:
-        pos_table = "<p>Sin posiciones DCA abiertas. Esperando caidas para comprar.</p>"
+        pos_table = (
+            '<p style="color:#666">Sin posiciones DCA abiertas. '
+            "Esperando caídas para comprar.</p>"
+        )
     else:
         pos_table = (
             '<table style="border-collapse:collapse;width:100%">'
-            '<tr style="background:#f8f9fa">'
-            '<th style="padding:6px;border:1px solid #ddd">Moneda</th>'
-            '<th style="padding:6px;border:1px solid #ddd">Precio compra</th>'
-            '<th style="padding:6px;border:1px solid #ddd">Precio actual</th>'
-            '<th style="padding:6px;border:1px solid #ddd">Invertido</th>'
-            '<th style="padding:6px;border:1px solid #ddd">Valor actual</th>'
-            '<th style="padding:6px;border:1px solid #ddd">P&amp;L</th>'
+            '<tr style="background:#e9ecef">'
+            '<th style="padding:8px;border:1px solid #ddd;text-align:left">Moneda</th>'
+            '<th style="padding:8px;border:1px solid #ddd;text-align:right">'
+            "Precio compra</th>"
+            '<th style="padding:8px;border:1px solid #ddd;text-align:right">'
+            "Precio actual</th>"
+            '<th style="padding:8px;border:1px solid #ddd;text-align:right">Invertido</th>'
+            '<th style="padding:8px;border:1px solid #ddd;text-align:right">'
+            "Valor actual</th>"
+            '<th style="padding:8px;border:1px solid #ddd;text-align:right">P&amp;L</th>'
+            '<th style="padding:8px;border:1px solid #ddd;text-align:center">Días</th>'
             "</tr>"
             f"{pos_rows}"
             "</table>"
         )
 
-    return (
-        '<h2>DCA Inteligente (BTC + ETH)</h2>'
-        '<table style="border-collapse:collapse;width:100%;margin-bottom:10px">'
+    # --- Secciones DCA completas ---
+    parts = [
+        '<h2 style="color:#333;border-bottom:2px solid #007bff;padding-bottom:6px">'
+        "\U0001f4b0 DCA Inteligente (BTC + ETH + BNB)</h2>",
+        # Resumen presupuestario
+        '<table style="border-collapse:collapse;width:100%;margin-bottom:12px">',
         "<tr>"
-        f'<td style="padding:6px;border:1px solid #ddd"><strong>Presupuesto DCA</strong></td>'
-        f'<td style="padding:6px;border:1px solid #ddd">${float(str(budget)):,.2f}</td>'
-        "</tr><tr>"
-        f'<td style="padding:6px;border:1px solid #ddd"><strong>Invertido</strong></td>'
-        f'<td style="padding:6px;border:1px solid #ddd">${float(str(invested)):,.2f}</td>'
-        "</tr><tr>"
-        f'<td style="padding:6px;border:1px solid #ddd"><strong>Disponible</strong></td>'
-        f'<td style="padding:6px;border:1px solid #ddd">${float(str(free)):,.2f}</td>'
-        "</tr><tr>"
-        f'<td style="padding:6px;border:1px solid #ddd"><strong>P&amp;L DCA</strong></td>'
-        f'<td style="padding:6px;border:1px solid #ddd;color:{pnl_color};font-weight:bold">'
+        f'<td style="padding:8px;border:1px solid #ddd"><strong>Presupuesto DCA</strong></td>'
+        f'<td style="padding:8px;border:1px solid #ddd">${float(str(budget)):,.2f}</td>'
+        "</tr>",
+        "<tr>"
+        f'<td style="padding:8px;border:1px solid #ddd"><strong>Invertido</strong></td>'
+        f'<td style="padding:8px;border:1px solid #ddd">${float(str(invested)):,.2f}</td>'
+        "</tr>",
+        "<tr>"
+        f'<td style="padding:8px;border:1px solid #ddd"><strong>Disponible</strong></td>'
+        f'<td style="padding:8px;border:1px solid #ddd">${float(str(free)):,.2f}</td>'
+        "</tr>",
+        "<tr>"
+        f'<td style="padding:8px;border:1px solid #ddd"><strong>P&amp;L total DCA</strong></td>'
+        f'<td style="padding:8px;border:1px solid #ddd;color:{pnl_color};font-weight:bold">'
         f'{pnl_sign}${float(str(total_pnl)):,.2f}</td>'
-        "</tr>"
-        "</table>"
-        f"{pos_table}"
-    )
+        "</tr>",
+        "</table>",
+        # Política por moneda
+        _build_dca_policies_section(),
+        # Acciones DCA del día
+        _build_dca_actions_section(dca_actions or []),
+        # Posiciones abiertas
+        '<h2 style="color:#333;border-bottom:2px solid #007bff;padding-bottom:6px">'
+        "\U0001f4ca Posiciones DCA abiertas</h2>",
+        pos_table,
+    ]
+    return "\n".join(parts)
 
 
 def _build_allocation_section(budgets: dict[str, float]) -> str:
@@ -228,6 +379,7 @@ def _build_html_body(
     is_paper: bool,
     dca_summary: dict[str, object] | None = None,
     allocation_budgets: dict[str, float] | None = None,
+    dca_actions: list[dict[str, object]] | None = None,
 ) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     pnl = total_value_after - total_value_before
@@ -343,7 +495,7 @@ def _build_html_body(
         "</table>"
         f"<h2>Operaciones Ejecutadas ({len(results)})</h2>"
         f"{ops_section}"
-        f"{_build_dca_section(dca_summary or {})}"
+        f"{_build_dca_section(dca_summary or {}, dca_actions=dca_actions or [])}"
         f"{_build_allocation_section(allocation_budgets or {})}"
         "<h2>Top 20 Predicciones</h2>"
         f"{preds_section}"
