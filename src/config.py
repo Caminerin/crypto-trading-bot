@@ -75,34 +75,34 @@ class MomentumAssetPolicy:
     trend_days: int = 7        # Días para confirmar tendencia alcista
 
 
-# Política óptima momentum por moneda (backtested 730d, 5472 combos)
+# Política óptima momentum por moneda (backtested 730d, 520 combos/moneda)
 DEFAULT_MOMENTUM_POLICIES: dict[str, MomentumAssetPolicy] = {
     "BTCUSDT": MomentumAssetPolicy(
-        momentum_threshold=0.05,
-        take_profit_pct=0.10,
-        stop_loss_pct=-0.05,
+        momentum_threshold=0.10,
+        take_profit_pct=0.30,
+        stop_loss_pct=-0.15,
         trend_days=3,
     ),
     "ETHUSDT": MomentumAssetPolicy(
-        momentum_threshold=0.03,
-        take_profit_pct=0.05,
-        stop_loss_pct=-0.03,
+        momentum_threshold=0.10,
+        take_profit_pct=0.30,
+        stop_loss_pct=-0.15,
         trend_days=14,
     ),
     "BNBUSDT": MomentumAssetPolicy(
         momentum_threshold=0.03,
         take_profit_pct=0.25,
-        stop_loss_pct=-0.03,
-        trend_days=5,
+        stop_loss_pct=-0.15,
+        trend_days=3,
     ),
     "SOLUSDT": MomentumAssetPolicy(
-        momentum_threshold=0.03,
-        take_profit_pct=0.10,
-        stop_loss_pct=-0.03,
-        trend_days=7,
+        momentum_threshold=0.07,
+        take_profit_pct=0.20,
+        stop_loss_pct=-0.15,
+        trend_days=3,
     ),
     "XRPUSDT": MomentumAssetPolicy(
-        momentum_threshold=0.03,
+        momentum_threshold=0.05,
         take_profit_pct=0.25,
         stop_loss_pct=-0.03,
         trend_days=14,
