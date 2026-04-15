@@ -115,6 +115,55 @@ COMBINATIONS: list[tuple[str, dict[str, dict[str, float]]]] = [
             "XRPUSDT": {"dip_threshold": -0.07, "take_profit": 0.21, "stop_loss": -0.14},
         },
     ),
+    # --- TP 2x (vende antes, mas trades cerrados) ---
+    (
+        "dip5/3, TP2x, SL2x",
+        {
+            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.06, "stop_loss": -0.06},
+            "ETHUSDT": {"dip_threshold": -0.05, "take_profit": 0.10, "stop_loss": -0.10},
+            "SOLUSDT": {"dip_threshold": -0.05, "take_profit": 0.10, "stop_loss": -0.10},
+            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.06, "stop_loss": -0.06},
+            "XRPUSDT": {"dip_threshold": -0.05, "take_profit": 0.10, "stop_loss": -0.10},
+        },
+    ),
+    # --- TP 2x con altcoins -7% ---
+    (
+        "dip7/3, TP2x, SL2x",
+        {
+            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.06, "stop_loss": -0.06},
+            "ETHUSDT": {"dip_threshold": -0.07, "take_profit": 0.14, "stop_loss": -0.14},
+            "SOLUSDT": {"dip_threshold": -0.07, "take_profit": 0.14, "stop_loss": -0.14},
+            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.06, "stop_loss": -0.06},
+            "XRPUSDT": {"dip_threshold": -0.07, "take_profit": 0.14, "stop_loss": -0.14},
+        },
+    ),
+    # --- Solo BTC+BNB con TP 2x ---
+    (
+        "solo BTC+BNB, dip3, TP2x, SL2x",
+        {
+            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.06, "stop_loss": -0.06},
+            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.06, "stop_loss": -0.06},
+        },
+    ),
+    # --- TP 2.5x (punto medio entre 2x y 3x) ---
+    (
+        "dip5/3, TP2.5x, SL2x",
+        {
+            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.075, "stop_loss": -0.06},
+            "ETHUSDT": {"dip_threshold": -0.05, "take_profit": 0.125, "stop_loss": -0.10},
+            "SOLUSDT": {"dip_threshold": -0.05, "take_profit": 0.125, "stop_loss": -0.10},
+            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.075, "stop_loss": -0.06},
+            "XRPUSDT": {"dip_threshold": -0.05, "take_profit": 0.125, "stop_loss": -0.10},
+        },
+    ),
+    # --- Solo BTC+BNB con TP 2.5x ---
+    (
+        "solo BTC+BNB, dip3, TP2.5x, SL2x",
+        {
+            "BTCUSDT": {"dip_threshold": -0.03, "take_profit": 0.075, "stop_loss": -0.06},
+            "BNBUSDT": {"dip_threshold": -0.03, "take_profit": 0.075, "stop_loss": -0.06},
+        },
+    ),
 ]
 
 
@@ -123,7 +172,7 @@ COMBINATIONS: list[tuple[str, dict[str, dict[str, float]]]] = [
 # ---------------------------------------------------------------------------
 
 def _fmt_sign(val: float) -> str:
-    return "+" if val >= 0 else ""
+    return "+" if val >= 0 else "-"
 
 
 def run_all(
@@ -146,7 +195,7 @@ def run_all(
         "=" * 100,
         f"  Periodo: {days} dias | Presupuesto: ${budget:.2f} USDT",
         "",
-        f"  {'Combinacion':<34s}"
+        f"  {'Combinacion':<35s}"
         f" {'P&L':>9s}"
         f" {'%':>7s}"
         f" {'Trades':>7s}"
@@ -172,7 +221,7 @@ def run_all(
             if r.sells > 0 else "N/A"
         )
         lines.append(
-            f"  {name:<34s}"
+            f"  {name:<35s}"
             f" {s}${abs(r.total_profit):>7.2f}"
             f" {sp}{abs(pnl_pct):>5.1f}%"
             f" {r.total_trades:>7d}"
