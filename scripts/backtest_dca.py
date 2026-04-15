@@ -142,8 +142,11 @@ class BacktestResult:
 def run_backtest(
     prices: dict[str, pd.DataFrame],
     budget: float,
+    asset_configs: dict[str, dict[str, float]] | None = None,
 ) -> BacktestResult:
     """Simula la estrategia DCA con params por moneda (TP+SL)."""
+    cfgs = asset_configs or ASSET_CONFIGS
+    symbols = list(cfgs.keys())
 
     result = BacktestResult(initial_budget=budget)
     positions: list[BTPosition] = []
@@ -152,7 +155,7 @@ def run_backtest(
     max_dd = 0.0
     hold_days_list: list[float] = []
     trade_returns: list[float] = []
-    asset_pnl: dict[str, float] = {sym: 0.0 for sym in DCA_ASSETS}
+    asset_pnl: dict[str, float] = {sym: 0.0 for sym in symbols}
 
     # Construir timeline unificado
     all_dates: set[pd.Timestamp] = set()
@@ -188,7 +191,7 @@ def run_backtest(
             if price is None:
                 continue
 
-            cfg = ASSET_CONFIGS[pos.symbol]
+            cfg = cfgs[pos.symbol]
             pnl_pct = (price - pos.entry_price) / pos.entry_price
 
             sell_reason = ""
@@ -236,11 +239,11 @@ def run_backtest(
 
         # 2. Check dip buys (umbral propio por moneda)
         dip_assets: list[tuple[str, float]] = []
-        for symbol in DCA_ASSETS:
+        for symbol in symbols:
             change = changes_24h.get(symbol)
             if change is None:
                 continue
-            cfg = ASSET_CONFIGS[symbol]
+            cfg = cfgs[symbol]
             if change <= cfg["dip_threshold"]:
                 already_in = any(
                     p.symbol == symbol for p in positions
@@ -268,7 +271,7 @@ def run_backtest(
                 cash -= buy_amount
                 result.buys += 1
                 result.total_trades += 1
-                cfg = ASSET_CONFIGS[symbol]
+                cfg = cfgs[symbol]
                 tp = round(
                     price * (1 + cfg["take_profit"]), 2,
                 )
