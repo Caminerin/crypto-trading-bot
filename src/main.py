@@ -234,6 +234,7 @@ def run_daily(config: AppConfig | None = None) -> None:
     # 7. ESTRATEGIA 2: DCA Inteligente (usa budget "dca")
     # ------------------------------------------------------------------
     dca_summary: dict = {}
+    dca_actions_today: list[DCAAction] = []
 
     if config.dca.enabled:
         logger.info("=" * 40)
@@ -261,6 +262,7 @@ def run_daily(config: AppConfig | None = None) -> None:
 
         # Evaluar y generar acciones DCA
         dca_actions = dca_strategy.evaluate(price_changes_24h, dca_prices)
+        dca_actions_today = list(dca_actions)
         logger.info("Acciones DCA: %d", len(dca_actions))
 
         # Ejecutar acciones DCA
@@ -328,6 +330,7 @@ def run_daily(config: AppConfig | None = None) -> None:
         is_paper=is_paper,
         dca_summary=dca_summary,
         allocation_budgets=allocator.get_all_budgets(),
+        dca_actions=dca_actions_today,
     )
     if email_sent:
         logger.info("Reporte enviado por email")
