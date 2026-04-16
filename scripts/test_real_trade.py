@@ -60,6 +60,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Solo comprar, no vender después",
     )
+    parser.add_argument(
+        "--sell-only",
+        action="store_true",
+        help="Solo vender el base asset existente, sin comprar.",
+    )
     return parser.parse_args()
 
 
@@ -80,6 +85,8 @@ def run_test(
     quote: str,
     amount: float,
     skip_sell: bool,
+    *,
+    sell_only: bool = False,
 ) -> bool:
     """Ejecuta el test de compra-venta.  Devuelve True si todo fue bien."""
 
@@ -143,6 +150,13 @@ def run_test(
         return False
 
     symbol = f"{base}{quote}"
+
+    # ------------------------------------------------------------------ #
+    # Modo --sell-only: vender lo que haya sin comprar
+    # ------------------------------------------------------------------ #
+    if sell_only:
+        return _sell_existing(client, base, quote, symbol, portfolio_before)
+
     logger.info(
         "Operando %s — gastando %.2f %s", symbol, amount, quote,
     )
@@ -308,6 +322,72 @@ def run_test(
     return True
 
 
+def _sell_existing(
+    client: BinanceTradingClient,
+    base: str,
+    quote: str,
+    symbol: str,
+    portfolio: dict[str, float],
+) -> bool:
+    """Vende todo el base asset disponible sin comprar primero."""
+    real_qty = portfolio.get(base, 0.0)
+    if real_qty <= 0:
+        logger.error("No tienes %s para vender.", base)
+        return False
+
+    logger.info("="* 60)
+    logger.info("MODO SELL-ONLY: vendiendo %.8f %s", real_qty, base)
+    logger.info("="* 60)
+
+    adjusted_qty, sell_error = client.validate_and_adjust_sell(
+        symbol, real_qty,
+    )
+    if sell_error:
+        logger.error(
+            "No se puede vender %.8f %s: %s", real_qty, base, sell_error,
+        )
+        return False
+
+    logger.info(
+        "VENTA de %.8f %s (%s)", adjusted_qty, base, symbol,
+    )
+
+    try:
+        sell_order = client.place_market_sell(symbol, adjusted_qty)
+    except BinanceAPIException as exc:
+        logger.error(
+            "Error Binance al vender: code=%d msg=%s",
+            exc.code,
+            exc.message,
+        )
+        return False
+    except Exception as exc:
+        logger.error("Error inesperado al vender: %s", exc)
+        return False
+
+    sell_fills = sell_order.get("fills", [])
+    sold_qty = sum(float(f["qty"]) for f in sell_fills)
+    sell_price = (
+        sum(float(f["price"]) * float(f["qty"]) for f in sell_fills)
+        / sold_qty
+        if sold_qty > 0
+        else 0.0
+    )
+    sell_total = sum(
+        float(f["price"]) * float(f["qty"]) for f in sell_fills
+    )
+
+    logger.info("VENTA OK:")
+    logger.info("  Order ID : %s", sell_order.get("orderId"))
+    logger.info("  Status   : %s", sell_order.get("status"))
+    logger.info("  Cantidad : %.8f %s", sold_qty, base)
+    logger.info("  Precio   : %.2f %s", sell_price, quote)
+    logger.info("  Recibido : %.4f %s", sell_total, quote)
+
+    _print_final_balance(client)
+    return True
+
+
 def _print_final_balance(client: BinanceTradingClient) -> None:
     """Muestra el balance final."""
     time.sleep(1)
@@ -320,7 +400,10 @@ def _print_final_balance(client: BinanceTradingClient) -> None:
 
 def main() -> None:
     args = _parse_args()
-    ok = run_test(args.base, args.quote, args.amount, args.skip_sell)
+    ok = run_test(
+        args.base, args.quote, args.amount, args.skip_sell,
+        sell_only=args.sell_only,
+    )
     if ok:
         logger.info("TEST COMPLETADO CON ÉXITO")
     else:
