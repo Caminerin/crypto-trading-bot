@@ -74,7 +74,11 @@ def send_daily_report(
         "Messages": [
             {
                 "From": {"Email": config.email_from, "Name": "Crypto Trading Bot"},
-                "To": [{"Email": config.email_to}],
+                "To": [
+                    {"Email": addr.strip()}
+                    for addr in config.email_to.split(",")
+                    if addr.strip()
+                ],
                 "Subject": subject,
                 "HTMLPart": html_body,
             }
