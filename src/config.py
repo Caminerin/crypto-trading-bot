@@ -45,7 +45,7 @@ class PortfolioConfig:
 
     max_positions: int = 5
     max_pct_per_coin: float = 0.20  # 20%
-    min_stablecoin_reserve: float = 0.10  # 10%
+    min_stablecoin_reserve: float = 0.0  # 0% (la reserva ya la gestiona AllocationConfig)
     quote_asset: str = os.getenv("QUOTE_ASSET", "USDT")
 
 
