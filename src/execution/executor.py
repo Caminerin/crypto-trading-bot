@@ -85,10 +85,42 @@ class OrderExecutor:
 
         try:
             if action.action == "SELL":
+                # Validar y ajustar cantidad al step_size de Binance
+                adjusted_qty, error = self._client.validate_and_adjust_sell(
+                    action.symbol,
+                    action.base_qty,
+                )
+                if error:
+                    logger.warning(
+                        "[SKIP] SELL %s omitida: %s",
+                        action.symbol,
+                        error,
+                    )
+                    return ExecutionResult(
+                        action=action,
+                        success=False,
+                        error=error,
+                    )
                 # Cancelar órdenes abiertas antes de vender
                 self._client.cancel_open_orders(action.symbol)
-                order = self._client.place_market_sell(action.symbol, action.base_qty)
+                order = self._client.place_market_sell(action.symbol, adjusted_qty)
             else:
+                # Validar monto mínimo para compra
+                buy_error = self._client.validate_buy(
+                    action.symbol,
+                    action.quote_qty,
+                )
+                if buy_error:
+                    logger.warning(
+                        "[SKIP] BUY %s omitida: %s",
+                        action.symbol,
+                        buy_error,
+                    )
+                    return ExecutionResult(
+                        action=action,
+                        success=False,
+                        error=buy_error,
+                    )
                 order = self._client.place_market_buy(action.symbol, action.quote_qty)
 
             # Extraer datos del resultado

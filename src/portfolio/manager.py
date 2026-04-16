@@ -27,6 +27,54 @@ class TradeAction:
     probability: float  # Probabilidad del modelo (solo compras)
 
 
+# Activos fiat / no-crypto que pueden aparecer en la cartera de Binance
+# (depósitos EUR, USD, etc.) y que NO deben generar órdenes de venta.
+_FIAT_ASSETS = frozenset(
+    {
+        "EUR",
+        "USD",
+        "GBP",
+        "TRY",
+        "BRL",
+        "ARS",
+        "RUB",
+        "UAH",
+        "NGN",
+        "AUD",
+        "JPY",
+        "KRW",
+        "INR",
+        "PLN",
+        "RON",
+        "CZK",
+        "HUF",
+        "BGN",
+        "SEK",
+        "NOK",
+        "DKK",
+        "CHF",
+        "CAD",
+        "NZD",
+        "MXN",
+        "ZAR",
+        "SGD",
+        "HKD",
+        "TWD",
+        "THB",
+        "IDR",
+        "PHP",
+        "VND",
+        "MYR",
+        "PKR",
+        "BDT",
+        "EGP",
+        "CLP",
+        "COP",
+        "PEN",
+    }
+)
+
+
 class PortfolioManager:
     """Genera las acciones de trading a partir del estado actual y las predicciones."""
 
@@ -61,7 +109,7 @@ class PortfolioManager:
         current_positions = {
             asset: qty
             for asset, qty in current_portfolio.items()
-            if asset not in stablecoins and qty > 0
+            if asset not in stablecoins and asset not in _FIAT_ASSETS and qty > 0
         }
 
         # Símbolos recomendados (ej. "BTCUSDT" -> "BTC")
@@ -101,11 +149,7 @@ class PortfolioManager:
         usdt_for_trading = max(0, usdt_available - min_reserve)
 
         # Contar posiciones que se mantienen (no vendidas)
-        kept_positions = {
-            asset
-            for asset in current_positions
-            if asset in recommended_assets
-        }
+        kept_positions = {asset for asset in current_positions if asset in recommended_assets}
         open_slots = self._pcfg.max_positions - len(kept_positions)
 
         if open_slots <= 0 or usdt_for_trading <= 0:
