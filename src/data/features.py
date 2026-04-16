@@ -61,6 +61,7 @@ def compute_features(
     df = _add_volatility_indicators(df)
     df = _add_volume_indicators(df)
     df = _add_price_change_features(df)
+    df = _add_microstructure_features(df)
     df = _add_support_resistance_features(df)
     df = _add_lag_features(df)
     df = _add_time_features(df)
@@ -167,6 +168,49 @@ def _add_price_change_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df["higher_high"] = (df["high"] > df["high"].shift(1)).astype(int)
     df["lower_low"] = (df["low"] < df["low"].shift(1)).astype(int)
+
+    return df
+
+
+# ------------------------------------------------------------------
+# Features de microestructura (velas + volumen)
+# ------------------------------------------------------------------
+
+def _add_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Features de microestructura derivadas de velas y volumen."""
+    # Volume spike: ratio volumen actual vs media 3h
+    vol_ma3 = df["volume"].rolling(window=3).mean()
+    df["volume_spike_3h"] = np.where(vol_ma3 > 0, df["volume"] / vol_ma3, 1.0)
+
+    # Price acceleration: segunda derivada del precio
+    roc1 = df["close"].pct_change()
+    df["price_acceleration"] = roc1 - roc1.shift(1)
+
+    # Sombras de la vela (upper/lower shadow)
+    body_high = df[["open", "close"]].max(axis=1)
+    body_low = df[["open", "close"]].min(axis=1)
+    df["upper_shadow_pct"] = (df["high"] - body_high) / df["close"]
+    df["lower_shadow_pct"] = (body_low - df["low"]) / df["close"]
+
+    # Cuerpo de la vela (body size)
+    df["body_pct"] = (df["close"] - df["open"]).abs() / df["close"]
+
+    # Velas verdes consecutivas
+    is_green = (df["close"] > df["open"]).astype(int)
+    groups = (is_green != is_green.shift()).cumsum()
+    df["consecutive_up"] = is_green.groupby(groups).cumsum()
+
+    # RSI divergence: precio sube pero RSI baja (senal bajista)
+    price_up = df["close"].diff() > 0
+    rsi_down = df["rsi_14"].diff() < 0
+    df["rsi_divergence"] = (price_up & rsi_down).astype(int)
+
+    # Volume-price trend: correlacion rolling entre cambio de precio y volumen
+    df["volume_price_trend"] = (
+        df["close"].pct_change()
+        .rolling(window=12)
+        .corr(df["volume"].pct_change())
+    )
 
     return df
 
@@ -406,6 +450,13 @@ def get_feature_columns(include_btc: bool = True) -> list[str]:
             "coin_btc_corr_24",
             "btc_dominance_proxy", "relative_perf_btc_24",
         ])
+
+    # Microestructura
+    base.extend([
+        "volume_spike_3h", "price_acceleration",
+        "upper_shadow_pct", "lower_shadow_pct", "body_pct",
+        "consecutive_up", "rsi_divergence", "volume_price_trend",
+    ])
 
     # Features de mercado global
     base.extend([

@@ -1,15 +1,15 @@
 """Modelo predictivo de subida de precio.
 
-Entrena un ensemble voting de 3 clasificadores (LightGBM, XGBoost,
-Random Forest) con voto suave (soft voting).  Los hiperparametros se
-optimizan automaticamente con Optuna y las features se filtran
-eliminando las de baja importancia.
+Entrena un stacking ensemble de 4 clasificadores base (LightGBM, XGBoost,
+Random Forest, ExtraTrees) con un meta-learner (LogisticRegression).
+Los hiperparametros se optimizan automaticamente con Optuna y las
+features se filtran eliminando las de baja importancia.
 
 Expone metodos para:
-- Preparar datos de entrenamiento (labeling).
+- Preparar datos de entrenamiento (labeling realista con TP/SL).
 - Optimizar hiperparametros (Optuna).
 - Seleccionar features automaticamente.
-- Entrenar y guardar el voting ensemble.
+- Entrenar stacking ensemble con meta-learner calibrado.
 - Cargar un ensemble guardado.
 - Predecir probabilidades sobre datos nuevos.
 
@@ -28,7 +28,7 @@ import numpy as np
 import optuna
 import pandas as pd
 import xgboost as xgb
-from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
@@ -47,16 +47,68 @@ OPTUNA_N_TRIALS = 30
 # Umbral minimo de importancia para conservar una feature (percentil)
 FEATURE_IMPORTANCE_THRESHOLD_PCTILE = 10
 
+# Gap entre folds de CV para evitar data leakage (en horas).
+PURGE_GAP_HOURS = 48
+
 
 # ------------------------------------------------------------------
 # Labeling
 # ------------------------------------------------------------------
 
-def create_labels(df: pd.DataFrame, target_pct: float, horizon: int = 24) -> pd.Series:
-    """Genera etiquetas binarias: 1 si el precio sube >= *target_pct* en *horizon* velas."""
-    future_close = df["close"].shift(-horizon)
-    pct_change = (future_close - df["close"]) / df["close"]
-    return (pct_change >= target_pct).astype(int)
+def create_labels(
+    df: pd.DataFrame,
+    target_pct: float,
+    horizon: int = 48,
+    stop_loss_pct: float | None = None,
+) -> pd.Series:
+    """Genera etiquetas binarias simulando la estrategia TP/SL real.
+
+    Para cada vela, recorre las siguientes *horizon* velas y comprueba:
+    - Si el ``high`` toca ``target_pct`` (TP) ANTES de que el ``low``
+      toque ``stop_loss_pct`` (SL) -> label = 1.
+    - Si el SL se toca primero, o no se toca nada -> label = 0.
+
+    Si *stop_loss_pct* es None, solo comprueba si el high toca TP
+    en algun momento de la ventana.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame con columnas ``close``, ``high``, ``low``.
+    target_pct : float
+        Porcentaje de subida para TP (ej. 0.03 = +3%).
+    horizon : int
+        Numero de velas a mirar hacia adelante.
+    stop_loss_pct : float | None
+        Porcentaje de bajada para SL (ej. 0.03 = -3%).
+        Si es None, solo se comprueba TP.
+    """
+    n = len(df)
+    labels = np.full(n, np.nan)
+    close_arr = df["close"].values
+    high_arr = df["high"].values
+    low_arr = df["low"].values
+
+    for i in range(n - 1):
+        entry_price = close_arr[i]
+        tp_price = entry_price * (1 + target_pct)
+        sl_price = entry_price * (1 - stop_loss_pct) if stop_loss_pct else 0.0
+        end_idx = min(i + horizon + 1, n)
+
+        hit_tp = False
+        hit_sl = False
+        for j in range(i + 1, end_idx):
+            if sl_price > 0 and low_arr[j] <= sl_price:
+                hit_sl = True
+                break
+            if high_arr[j] >= tp_price:
+                hit_tp = True
+                break
+
+        if i + horizon < n:
+            labels[i] = 1.0 if hit_tp and not hit_sl else 0.0
+
+    return pd.Series(labels, index=df.index)
 
 
 # ------------------------------------------------------------------
@@ -177,17 +229,16 @@ def _select_features(
 
 
 # ------------------------------------------------------------------
-# Voting ensemble builder
+# Base model builders
 # ------------------------------------------------------------------
 
-def _build_voting(
+def _build_base_models(
     lgbm_params: dict[str, Any],
     spw: float,
-) -> VotingClassifier:
-    """Construye un VotingClassifier (soft) con LightGBM, XGBoost y RF.
+) -> dict[str, Any]:
+    """Construye los 4 modelos base para el stacking.
 
-    Cada modelo vota con sus probabilidades y se promedian.
-    Los hiperparametros de Optuna se comparten entre modelos.
+    Returns dict {name: estimator} sin entrenar.
     """
     lgbm = lgb.LGBMClassifier(
         **lgbm_params,
@@ -216,11 +267,47 @@ def _build_voting(
         random_state=42,
         n_jobs=-1,
     )
-    return VotingClassifier(
-        estimators=[("lgbm", lgbm), ("xgb", xgb_clf), ("rf", rf)],
-        voting="soft",
+    et = ExtraTreesClassifier(
+        n_estimators=300,
+        max_depth=min(lgbm_params.get("max_depth", 6) + 4, 14),
+        min_samples_leaf=lgbm_params.get("min_child_samples", 20),
+        class_weight="balanced",
+        random_state=42,
         n_jobs=-1,
     )
+    return {"lgbm": lgbm, "xgb": xgb_clf, "rf": rf, "et": et}
+
+
+def _compute_sample_weights(n_samples: int, half_life_days: int = 7) -> np.ndarray:
+    """Pesos exponenciales decrecientes: datos recientes pesan mas.
+
+    El peso se duplica cada *half_life_days* dias (asumiendo datos horarios
+    de multiples monedas, el indice ya esta ordenado cronologicamente).
+    """
+    decay = np.log(2) / (half_life_days * 24)
+    positions = np.arange(n_samples, dtype=float)
+    weights = np.exp(decay * (positions - n_samples + 1))
+    weights /= weights.mean()
+    return weights
+
+
+def _purged_ts_split(
+    n_samples: int,
+    n_splits: int = 3,
+    gap: int = 0,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """TimeSeriesSplit con gap (purge) entre train y validation.
+
+    Elimina *gap* muestras entre el final de train y el inicio de
+    validation para evitar data leakage por el horizonte de labeling.
+    """
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    purged_splits: list[tuple[np.ndarray, np.ndarray]] = []
+    for train_idx, val_idx in tscv.split(np.arange(n_samples)):
+        if gap > 0:
+            train_idx = train_idx[:-gap] if len(train_idx) > gap else train_idx
+        purged_splits.append((train_idx, val_idx))
+    return purged_splits
 
 
 # ------------------------------------------------------------------
@@ -228,13 +315,14 @@ def _build_voting(
 # ------------------------------------------------------------------
 
 class PricePredictor:
-    """Voting ensemble (LightGBM + XGBoost + Random Forest)
-    con optimizacion Optuna y feature selection automatica."""
+    """Stacking ensemble (LightGBM + XGBoost + RF + ExtraTrees)
+    con meta-learner LogisticRegression, optimizacion Optuna
+    y feature selection automatica."""
 
     def __init__(self, config: ModelConfig) -> None:
         self._config = config
-        self._model: VotingClassifier | None = None
-        self._calibrator: LogisticRegression | None = None
+        self._base_models: dict[str, Any] | None = None
+        self._meta_learner: LogisticRegression | None = None
         self._feature_cols = get_feature_columns(include_btc=True)
         self._selected_features: list[str] | None = None
 
@@ -243,16 +331,15 @@ class PricePredictor:
     # ------------------------------------------------------------------
 
     def train(self, klines_by_symbol: dict[str, pd.DataFrame]) -> dict[str, float]:
-        """Entrena el modelo con datos de multiples monedas.
+        """Entrena el stacking ensemble con datos de multiples monedas.
 
         Pipeline completo:
-        1. Preparar datos (features + labels).
+        1. Preparar datos (features + labels realistas TP/SL).
         2. Optuna -- buscar mejores hiperparametros.
         3. Feature selection -- eliminar features ruidosas.
-        4. Voting ensemble -- entrenar con los parametros optimos.
-        5. Evaluar con TimeSeriesSplit.
+        4. Stacking: entrenar base models + meta-learner.
 
-        Extrae BTCUSDT del dict para usarlo como features de mercado.
+        Extrae BTC del dict para usarlo como features de mercado.
         Devuelve metricas de evaluacion.
         """
         logger.info("Preparando datos de entrenamiento con %d monedas", len(klines_by_symbol))
@@ -273,6 +360,7 @@ class PricePredictor:
             logger.warning("No se pudieron calcular features de mercado global")
 
         horizon = self._config.target_horizon_hours
+        target_pct = self._config.target_pct_change
         all_X: list[pd.DataFrame] = []
         all_y: list[pd.Series] = []
 
@@ -281,8 +369,11 @@ class PricePredictor:
                 df, btc_df=btc_df,
                 market_df=market_df if not market_df.empty else None,
             )
+            # Labels realistas: TP/SL simulado en ventana de *horizon* velas
             labels = create_labels(
-                featured, self._config.target_pct_change, horizon=horizon,
+                featured, target_pct,
+                horizon=horizon,
+                stop_loss_pct=target_pct,
             )
 
             # Eliminar filas sin label (ultimas *horizon* velas)
@@ -319,6 +410,9 @@ class PricePredictor:
         pos_count = int((y == 1).sum())
         spw = neg_count / max(pos_count, 1)
 
+        # Sample weights: datos recientes pesan mas
+        sample_w = _compute_sample_weights(len(X))
+
         # ----------------------------------------------------------
         # Paso 1: Optuna -- buscar mejores hiperparametros
         # ----------------------------------------------------------
@@ -338,47 +432,64 @@ class PricePredictor:
         X_sel = X[self._selected_features]
 
         # ----------------------------------------------------------
-        # Paso 3: Evaluar con Time Series Split
+        # Paso 3: Evaluar con Purged Time Series Split + Stacking
         # ----------------------------------------------------------
-        logger.info("Paso 3/4: Evaluando con TimeSeriesSplit...")
-        tscv = TimeSeriesSplit(n_splits=3)
+        logger.info("Paso 3/4: Evaluando con Purged TimeSeriesSplit...")
+
+        n_coins = len(klines_by_symbol)
+        purge_gap = PURGE_GAP_HOURS * max(n_coins, 1)
+        splits = _purged_ts_split(len(X_sel), n_splits=3, gap=purge_gap)
+
         auc_scores: list[float] = []
         per_model_auc: dict[str, list[float]] = {
-            "lgbm": [], "xgb": [], "rf": [],
+            "lgbm": [], "xgb": [], "rf": [], "et": [],
         }
 
-        for fold, (train_idx, val_idx) in enumerate(tscv.split(X_sel)):
+        # Matrices para OOF probabilities (stacking)
+        model_names = ["lgbm", "xgb", "rf", "et"]
+        oof_probs = np.full((len(y), len(model_names)), np.nan)
+
+        for fold, (train_idx, val_idx) in enumerate(splits):
             X_train, X_val = X_sel.iloc[train_idx], X_sel.iloc[val_idx]
             y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+            w_train = sample_w[train_idx]
 
-            ensemble = _build_voting(best_params, spw)
-            ensemble.fit(X_train, y_train)
+            base_models = _build_base_models(best_params, spw)
 
-            # AUC del voting ensemble
-            y_prob = ensemble.predict_proba(X_val)[:, 1]
-            auc = roc_auc_score(y_val, y_prob)
-            auc_scores.append(auc)
-            logger.info("Fold %d -- Voting AUC: %.4f", fold, auc)
+            # Entrenar cada modelo base por separado
+            fold_probs = np.zeros((len(val_idx), len(model_names)))
+            for m_idx, (name, model) in enumerate(base_models.items()):
+                if name in ("lgbm", "xgb"):
+                    model.fit(X_train, y_train, sample_weight=w_train)
+                else:
+                    model.fit(X_train, y_train)
 
-            # AUC por modelo individual
-            for name, estimator in ensemble.named_estimators_.items():
-                y_prob_i = estimator.predict_proba(X_val)[:, 1]
+                y_prob_i = model.predict_proba(X_val)[:, 1]
+                fold_probs[:, m_idx] = y_prob_i
                 auc_i = roc_auc_score(y_val, y_prob_i)
                 per_model_auc[name].append(auc_i)
                 logger.info("  Fold %d -- %s AUC: %.4f", fold, name, auc_i)
+
+                # Guardar OOF probabilities para stacking
+                oof_probs[val_idx, m_idx] = y_prob_i
+
+            # AUC del stacking (promedio simple como proxy)
+            avg_prob = fold_probs.mean(axis=1)
+            auc = roc_auc_score(y_val, avg_prob)
+            auc_scores.append(auc)
+            logger.info("Fold %d -- Stacking AUC (avg proxy): %.4f", fold, auc)
 
         # Log de AUC medio por modelo
         for name, scores in per_model_auc.items():
             logger.info("%s AUC medio: %.4f", name, np.mean(scores))
 
-        # Guardar metricas del ultimo fold de CV (las mas honestas)
-        last_fold_idx = len(auc_scores) - 1
-        last_train_idx, last_val_idx = list(tscv.split(X_sel))[last_fold_idx]
-        X_val_last = X_sel.iloc[last_val_idx]
+        # Metricas del ultimo fold (las mas honestas)
+        last_val_idx = splits[-1][1]
         y_val_last = y.iloc[last_val_idx]
 
-        # Evaluar el ultimo ensemble de CV sobre su validation set
-        y_pred_cv = ensemble.predict(X_val_last)
+        # Usar promedio de OOF del ultimo fold como prediccion
+        last_avg_prob = oof_probs[last_val_idx].mean(axis=1)
+        y_pred_cv = (last_avg_prob >= 0.5).astype(int)
         cv_report = classification_report(y_val_last, y_pred_cv, output_dict=True)
         logger.info(
             "Metricas HONESTAS (ultimo fold CV, datos no vistos):\n%s",
@@ -386,38 +497,44 @@ class PricePredictor:
         )
 
         # ----------------------------------------------------------
-        # Paso 4: Entrenamiento final + calibración Platt Scaling
+        # Paso 4: Entrenar modelos finales + meta-learner
         # ----------------------------------------------------------
-        logger.info("Paso 4/4: Entrenamiento final + calibración Platt Scaling...")
-        self._model = _build_voting(best_params, spw)
-        self._model.fit(X_sel, y)
+        logger.info("Paso 4/4: Entrenamiento final (stacking)...")
 
-        # Platt Scaling: ajustar LogisticRegression sobre probabilidades
-        # de CV para mapear prob_raw -> prob_calibrada.
-        # Recogemos probabilidades out-of-fold del paso 3.
-        oof_probs = np.full(len(y), np.nan)
-        for train_idx, val_idx in tscv.split(X_sel):
-            X_tr, X_vl = X_sel.iloc[train_idx], X_sel.iloc[val_idx]
-            y_tr = y.iloc[train_idx]
-            tmp_ens = _build_voting(best_params, spw)
-            tmp_ens.fit(X_tr, y_tr)
-            oof_probs[val_idx] = tmp_ens.predict_proba(X_vl)[:, 1]
+        # Entrenar modelos base en todos los datos
+        self._base_models = _build_base_models(best_params, spw)
+        for name, model in self._base_models.items():
+            if name in ("lgbm", "xgb"):
+                model.fit(X_sel, y, sample_weight=sample_w)
+            else:
+                model.fit(X_sel, y)
 
-        valid_mask = ~np.isnan(oof_probs)
-        self._calibrator = LogisticRegression(max_iter=1000)
-        self._calibrator.fit(
-            oof_probs[valid_mask].reshape(-1, 1),
-            y.values[valid_mask],
-        )
-        # Log de la calibración
-        raw_sample = np.array([0.05, 0.10, 0.15, 0.20, 0.25]).reshape(-1, 1)
-        cal_sample = self._calibrator.predict_proba(raw_sample)[:, 1]
-        logger.info("Calibración Platt Scaling ajustada:")
-        for raw_val, cal_val in zip(raw_sample.ravel(), cal_sample):
-            logger.info("  raw=%.2f -> calibrada=%.1f%%", raw_val, cal_val * 100)
+        # Meta-learner: LogisticRegression sobre OOF probabilities
+        valid_oof_mask = ~np.isnan(oof_probs).any(axis=1)
+        oof_valid = oof_probs[valid_oof_mask]
+        y_valid = y.values[valid_oof_mask]
+
+        self._meta_learner = LogisticRegression(max_iter=1000, random_state=42)
+        self._meta_learner.fit(oof_valid, y_valid)
+
+        # Log de calibracion del meta-learner
+        test_inputs = np.array([
+            [0.10, 0.10, 0.10, 0.10],
+            [0.15, 0.15, 0.15, 0.15],
+            [0.20, 0.20, 0.20, 0.20],
+            [0.25, 0.25, 0.25, 0.25],
+            [0.30, 0.30, 0.30, 0.30],
+            [0.40, 0.40, 0.40, 0.40],
+            [0.50, 0.50, 0.50, 0.50],
+        ])
+        test_outputs = self._meta_learner.predict_proba(test_inputs)[:, 1]
+        logger.info("Meta-learner calibracion (4 modelos de acuerdo):")
+        for inp, out in zip(test_inputs, test_outputs):
+            logger.info(
+                "  base_probs=%.2f -> meta=%.1f%%", inp[0], out * 100,
+            )
 
         mean_auc = float(np.mean(auc_scores))
-        # Usar metricas de CV (honestas), no de training
         cv_cls1 = cv_report.get("1", {})
         metrics: dict[str, Any] = {
             "mean_auc": mean_auc,
@@ -431,11 +548,10 @@ class PricePredictor:
             "n_features_selected": len(self._selected_features),
             "best_params": best_params,
         }
-        # Incluir AUC por modelo individual
         for name, scores in per_model_auc.items():
             metrics[f"auc_{name}"] = float(np.mean(scores))
 
-        logger.info("Voting AUC medio CV: %.4f", mean_auc)
+        logger.info("Stacking AUC medio CV: %.4f", mean_auc)
         logger.info(
             "Features: %d seleccionadas de %d originales",
             len(self._selected_features), len(self._feature_cols),
@@ -449,21 +565,20 @@ class PricePredictor:
     def predict(self, klines_by_symbol: dict[str, pd.DataFrame]) -> dict[str, float]:
         """Devuelve {symbol: probabilidad_subida} para cada moneda.
 
-        Extrae BTC del dict para features de mercado.
-        Solo incluye la ultima fila de features de cada moneda
-        (= estado actual del mercado).
+        Usa los 4 modelos base para generar probabilidades y el
+        meta-learner para combinarlas en una probabilidad calibrada.
         """
-        if self._model is None:
+        if self._base_models is None:
             raise RuntimeError("El modelo no esta entrenado ni cargado.")
 
         btc_df = klines_by_symbol.get(f"BTC{_QUOTE}")
 
-        # Calcular features de mercado global para predicción
+        # Calcular features de mercado global para prediccion
         market_df = compute_market_features(klines_by_symbol)
         mkt = market_df if not market_df.empty else None
 
-        # Usar features seleccionadas si estan disponibles
         feat_cols = self._selected_features or self._feature_cols
+        model_names = list(self._base_models.keys())
 
         predictions: dict[str, float] = {}
         for symbol, df in klines_by_symbol.items():
@@ -472,15 +587,21 @@ class PricePredictor:
                 if featured.empty:
                     continue
                 last_row = featured[feat_cols].iloc[[-1]]
-                raw_prob = self._model.predict_proba(last_row)[0, 1]
-                if self._calibrator is not None:
+
+                # Obtener probabilidades de cada modelo base
+                base_probs = np.array([
+                    self._base_models[name].predict_proba(last_row)[0, 1]
+                    for name in model_names
+                ]).reshape(1, -1)
+
+                # Meta-learner combina las probabilidades
+                if self._meta_learner is not None:
                     prob = float(
-                        self._calibrator.predict_proba(
-                            np.array([[raw_prob]]),
-                        )[0, 1]
+                        self._meta_learner.predict_proba(base_probs)[0, 1],
                     )
                 else:
-                    prob = float(raw_prob)
+                    prob = float(base_probs.mean())
+
                 predictions[symbol] = prob
             except Exception as exc:
                 logger.warning("Error prediciendo %s: %s", symbol, exc)
@@ -523,17 +644,17 @@ class PricePredictor:
     # ------------------------------------------------------------------
 
     def save(self, path: Path | None = None) -> Path:
-        """Guarda el ensemble y la lista de features seleccionadas."""
+        """Guarda los modelos base, meta-learner y features seleccionadas."""
         save_path = path or MODEL_FILE
-        if self._model is None:
+        if self._base_models is None:
             raise RuntimeError("No hay modelo para guardar.")
         payload = {
-            "model": self._model,
-            "calibrator": self._calibrator,
+            "base_models": self._base_models,
+            "meta_learner": self._meta_learner,
             "selected_features": self._selected_features,
         }
         joblib.dump(payload, save_path)
-        logger.info("Voting ensemble guardado en %s", save_path)
+        logger.info("Stacking ensemble guardado en %s", save_path)
         return save_path
 
     def load(self, path: Path | None = None) -> None:
@@ -542,37 +663,43 @@ class PricePredictor:
         if not load_path.exists():
             raise FileNotFoundError(f"No se encontro el modelo en {load_path}")
         payload = joblib.load(load_path)
-        if isinstance(payload, dict):
-            self._model = payload["model"]
-            self._calibrator = payload.get("calibrator")
+        if isinstance(payload, dict) and "base_models" in payload:
+            self._base_models = payload["base_models"]
+            self._meta_learner = payload.get("meta_learner")
+            self._selected_features = payload.get("selected_features")
+        elif isinstance(payload, dict) and "model" in payload:
+            # Compatibilidad con modelos VotingClassifier antiguos
+            old_model = payload["model"]
+            self._base_models = {
+                name: est
+                for name, est in old_model.named_estimators_.items()
+            }
+            self._meta_learner = payload.get("calibrator")
             self._selected_features = payload.get("selected_features")
         else:
-            # Compatibilidad con modelos guardados antes del stacking
-            self._model = payload
-            self._calibrator = None
-            self._selected_features = None
+            raise ValueError("Formato de modelo no reconocido.")
         logger.info("Ensemble cargado desde %s", load_path)
 
     @property
     def is_trained(self) -> bool:
-        return self._model is not None
+        return self._base_models is not None
 
     def feature_importance(self) -> pd.DataFrame:
         """Devuelve importancia media de cada feature (promediada entre modelos).
 
-        LightGBM y XGBoost exponen feature_importances_ directamente.
-        Random Forest tambien.  Promediamos las tres (normalizadas).
+        LightGBM, XGBoost, RF y ExtraTrees exponen feature_importances_.
+        Promediamos las cuatro (normalizadas).
         """
-        if self._model is None:
+        if self._base_models is None:
             raise RuntimeError("Modelo no entrenado.")
 
         feat_cols = self._selected_features or self._feature_cols
         importances: list[np.ndarray] = []
-        for _name, estimator in self._model.named_estimators_.items():
+        for _name, estimator in self._base_models.items():
             imp = np.array(estimator.feature_importances_, dtype=float)
             total = imp.sum()
             if total > 0:
-                imp = imp / total  # normalizar a [0, 1]
+                imp = imp / total
             importances.append(imp)
 
         avg_importance = np.mean(importances, axis=0)
