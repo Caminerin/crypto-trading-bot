@@ -18,7 +18,7 @@ Bot de trading automático para Binance Spot que cada mañana analiza las 200 mo
 | Máx. % por moneda | 20% |
 | Reserva mínima en USDT | 10% |
 | Stop-loss | 3% |
-| Take-profit | 5% |
+| Take-profit | 3% |
 | Tipo de orden | Market |
 
 ## Requisitos
