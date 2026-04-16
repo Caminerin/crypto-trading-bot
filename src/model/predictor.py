@@ -42,7 +42,7 @@ logger = get_logger(__name__)
 MODEL_FILE = MODELS_DIR / "predictor.joblib"
 
 # Numero de trials de Optuna (equilibrio velocidad/calidad)
-OPTUNA_N_TRIALS = 50
+OPTUNA_N_TRIALS = 30
 
 # Umbral minimo de importancia para conservar una feature (percentil)
 FEATURE_IMPORTANCE_THRESHOLD_PCTILE = 10
