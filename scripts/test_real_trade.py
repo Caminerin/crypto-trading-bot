@@ -217,10 +217,19 @@ def run_test(
     # ------------------------------------------------------------------ #
     # 6. VENTA (inmediata)
     # ------------------------------------------------------------------ #
-    time.sleep(1)  # pequeña pausa para que Binance refleje el balance
+    time.sleep(2)  # pausa para que Binance refleje el balance
+
+    # Leer balance real (la comisión ya está descontada)
+    portfolio_after_buy = client.get_portfolio()
+    real_qty = portfolio_after_buy.get(base, 0.0)
+    logger.info(
+        "Balance real de %s tras compra: %.8f (comisión ya descontada)",
+        base,
+        real_qty,
+    )
 
     adjusted_qty, sell_error = client.validate_and_adjust_sell(
-        symbol, bought_qty,
+        symbol, real_qty,
     )
     if sell_error:
         logger.warning(
