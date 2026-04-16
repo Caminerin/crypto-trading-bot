@@ -435,7 +435,14 @@ class BinanceTradingClient:
         quantity: float,
         entry_price: float,
     ) -> dict[str, Any] | None:
-        """Coloca una orden OCO de venta (stop-loss + take-profit)."""
+        """Coloca una orden OCO de venta (stop-loss + take-profit).
+
+        Usa la API nueva de Binance (orderList/oco) con parámetros
+        aboveType/belowType.
+
+        Above = take-profit (LIMIT_MAKER): vende cuando sube.
+        Below = stop-loss (STOP_LOSS_LIMIT): vende cuando baja.
+        """
         take_profit_price = round(entry_price * (1 + self._risk_cfg.take_profit_pct), 8)
         stop_price = round(entry_price * (1 - self._risk_cfg.stop_loss_pct), 8)
         stop_limit_price = round(stop_price * 0.995, 8)
@@ -452,10 +459,12 @@ class BinanceTradingClient:
                 symbol=symbol,
                 side="SELL",
                 quantity=f"{quantity:.8f}",
-                price=f"{take_profit_price:.8f}",
-                stopPrice=f"{stop_price:.8f}",
-                stopLimitPrice=f"{stop_limit_price:.8f}",
-                stopLimitTimeInForce="GTC",
+                aboveType="LIMIT_MAKER",
+                abovePrice=f"{take_profit_price:.8f}",
+                belowType="STOP_LOSS_LIMIT",
+                belowPrice=f"{stop_limit_price:.8f}",
+                belowStopPrice=f"{stop_price:.8f}",
+                belowTimeInForce="GTC",
             )
             return order
         except BinanceAPIException as exc:
