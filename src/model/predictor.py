@@ -28,7 +28,6 @@ import numpy as np
 import optuna
 import pandas as pd
 import xgboost as xgb
-from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.metrics import classification_report, roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
@@ -385,17 +384,11 @@ class PricePredictor:
         )
 
         # ----------------------------------------------------------
-        # Paso 4: Entrenamiento final con todos los datos + calibración
+        # Paso 4: Entrenamiento final con todos los datos
         # ----------------------------------------------------------
-        logger.info("Paso 4/4: Entrenamiento final + calibración de probabilidades...")
-        base_model = _build_voting(best_params, spw)
-        # Calibrar probabilidades con isotonic regression (CV interno)
-        # Esto asegura que cuando el modelo dice 65%, realmente sube ~65% de las veces
-        self._model = CalibratedClassifierCV(
-            base_model, method="isotonic", cv=3,
-        )
+        logger.info("Paso 4/4: Entrenamiento final con todos los datos...")
+        self._model = _build_voting(best_params, spw)
         self._model.fit(X_sel, y)
-        logger.info("Modelo calibrado con isotonic regression (3-fold)")
 
         mean_auc = float(np.mean(auc_scores))
         # Usar metricas de CV (honestas), no de training
@@ -532,26 +525,13 @@ class PricePredictor:
 
         LightGBM y XGBoost exponen feature_importances_ directamente.
         Random Forest tambien.  Promediamos las tres (normalizadas).
-        Soporta tanto VotingClassifier directo como CalibratedClassifierCV.
         """
         if self._model is None:
             raise RuntimeError("Modelo no entrenado.")
 
         feat_cols = self._selected_features or self._feature_cols
-
-        # Extraer el VotingClassifier del wrapper de calibración si aplica
-        if isinstance(self._model, CalibratedClassifierCV):
-            # CalibratedClassifierCV entrena clones internos; extraemos
-            # feature importances del primer calibrated_classifier
-            base_estimators = self._model.calibrated_classifiers_
-            if not base_estimators:
-                raise RuntimeError("Modelo calibrado sin estimadores internos.")
-            voting = base_estimators[0].estimator
-        else:
-            voting = self._model
-
         importances: list[np.ndarray] = []
-        for _name, estimator in voting.named_estimators_.items():
+        for _name, estimator in self._model.named_estimators_.items():
             imp = np.array(estimator.feature_importances_, dtype=float)
             total = imp.sum()
             if total > 0:
