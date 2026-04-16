@@ -209,10 +209,11 @@ class BinanceDataClient:
         start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
         start_ms = int(start_time.timestamp() * 1000)
 
-        if self._uses_http:
-            all_raw: list[list[Any]] = []
-            current_start = start_ms
-            while True:
+        # Paginar para obtener todas las velas solicitadas (máx 1000 por llamada)
+        all_raw: list[list[Any]] = []
+        current_start = start_ms
+        while True:
+            if self._uses_http:
                 raw = self._http_get(
                     "klines",
                     {
@@ -222,21 +223,22 @@ class BinanceDataClient:
                         "limit": 1000,
                     },
                 )
-                if not raw:
-                    break
-                all_raw.extend(raw)
-                if len(raw) < 1000:
-                    break
-                current_start = raw[-1][0] + 1
+            else:
+                raw = self._client.get_klines(
+                    symbol=symbol,
+                    interval=interval,
+                    startTime=current_start,
+                    limit=1000,
+                )
+            if not raw:
+                break
+            all_raw.extend(raw)
+            if len(raw) < 1000:
+                break
+            current_start = raw[-1][0] + 1
+            if self._uses_http:
                 time.sleep(0.1)
-            raw = all_raw
-        else:
-            raw = self._client.get_klines(
-                symbol=symbol,
-                interval=interval,
-                startTime=start_ms,
-                limit=1000,
-            )
+        raw = all_raw
 
         if not raw:
             return pd.DataFrame(columns=_KLINE_COLUMNS).set_index("open_time")

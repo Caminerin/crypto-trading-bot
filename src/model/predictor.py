@@ -28,12 +28,13 @@ import numpy as np
 import optuna
 import pandas as pd
 import xgboost as xgb
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.metrics import classification_report, roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
 from src.config import _QUOTE, MODELS_DIR, ModelConfig
-from src.data.features import compute_features, get_feature_columns
+from src.data.features import compute_features, compute_market_features, get_feature_columns
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -41,7 +42,7 @@ logger = get_logger(__name__)
 MODEL_FILE = MODELS_DIR / "predictor.joblib"
 
 # Numero de trials de Optuna (equilibrio velocidad/calidad)
-OPTUNA_N_TRIALS = 25
+OPTUNA_N_TRIALS = 50
 
 # Umbral minimo de importancia para conservar una feature (percentil)
 FEATURE_IMPORTANCE_THRESHOLD_PCTILE = 10
@@ -263,12 +264,22 @@ class PricePredictor:
         else:
             logger.warning("%s no encontrado -- features de BTC no disponibles", btc_symbol)
 
+        # Calcular features de mercado global (cross-coin)
+        market_df = compute_market_features(klines_by_symbol)
+        if not market_df.empty:
+            logger.info("Features de mercado global calculadas (%d filas)", len(market_df))
+        else:
+            logger.warning("No se pudieron calcular features de mercado global")
+
         horizon = self._config.target_horizon_hours
         all_X: list[pd.DataFrame] = []
         all_y: list[pd.Series] = []
 
         for symbol, df in klines_by_symbol.items():
-            featured = compute_features(df, btc_df=btc_df)
+            featured = compute_features(
+                df, btc_df=btc_df,
+                market_df=market_df if not market_df.empty else None,
+            )
             labels = create_labels(
                 featured, self._config.target_pct_change, horizon=horizon,
             )
@@ -374,11 +385,17 @@ class PricePredictor:
         )
 
         # ----------------------------------------------------------
-        # Paso 4: Entrenamiento final con todos los datos
+        # Paso 4: Entrenamiento final con todos los datos + calibración
         # ----------------------------------------------------------
-        logger.info("Paso 4/4: Entrenamiento final con todos los datos...")
-        self._model = _build_voting(best_params, spw)
+        logger.info("Paso 4/4: Entrenamiento final + calibración de probabilidades...")
+        base_model = _build_voting(best_params, spw)
+        # Calibrar probabilidades con isotonic regression (CV interno)
+        # Esto asegura que cuando el modelo dice 65%, realmente sube ~65% de las veces
+        self._model = CalibratedClassifierCV(
+            base_model, method="isotonic", cv=3,
+        )
         self._model.fit(X_sel, y)
+        logger.info("Modelo calibrado con isotonic regression (3-fold)")
 
         mean_auc = float(np.mean(auc_scores))
         # Usar metricas de CV (honestas), no de training
@@ -422,13 +439,17 @@ class PricePredictor:
 
         btc_df = klines_by_symbol.get(f"BTC{_QUOTE}")
 
+        # Calcular features de mercado global para predicción
+        market_df = compute_market_features(klines_by_symbol)
+        mkt = market_df if not market_df.empty else None
+
         # Usar features seleccionadas si estan disponibles
         feat_cols = self._selected_features or self._feature_cols
 
         predictions: dict[str, float] = {}
         for symbol, df in klines_by_symbol.items():
             try:
-                featured = compute_features(df, btc_df=btc_df)
+                featured = compute_features(df, btc_df=btc_df, market_df=mkt)
                 if featured.empty:
                     continue
                 last_row = featured[feat_cols].iloc[[-1]]
@@ -511,13 +532,26 @@ class PricePredictor:
 
         LightGBM y XGBoost exponen feature_importances_ directamente.
         Random Forest tambien.  Promediamos las tres (normalizadas).
+        Soporta tanto VotingClassifier directo como CalibratedClassifierCV.
         """
         if self._model is None:
             raise RuntimeError("Modelo no entrenado.")
 
         feat_cols = self._selected_features or self._feature_cols
+
+        # Extraer el VotingClassifier del wrapper de calibración si aplica
+        if isinstance(self._model, CalibratedClassifierCV):
+            # CalibratedClassifierCV entrena clones internos; extraemos
+            # feature importances del primer calibrated_classifier
+            base_estimators = self._model.calibrated_classifiers_
+            if not base_estimators:
+                raise RuntimeError("Modelo calibrado sin estimadores internos.")
+            voting = base_estimators[0].estimator
+        else:
+            voting = self._model
+
         importances: list[np.ndarray] = []
-        for _name, estimator in self._model.named_estimators_.items():
+        for _name, estimator in voting.named_estimators_.items():
             imp = np.array(estimator.feature_importances_, dtype=float)
             total = imp.sum()
             if total > 0:

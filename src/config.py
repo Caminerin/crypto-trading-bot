@@ -29,13 +29,13 @@ class ModelConfig:
     """Parámetros del modelo predictivo."""
 
     top_n_coins: int = 50
-    confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.55"))
+    confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.65"))
     target_pct_change: float = 0.03  # 3%
     target_horizon_hours: int = 48
     lookback_hours: int = 120
     candle_interval: str = "1h"
     retrain_interval_days: int = 7
-    training_days: int = 90
+    training_days: int = 180
 
 
 @dataclass(frozen=True)

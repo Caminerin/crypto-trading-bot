@@ -30,6 +30,7 @@ MIN_ROWS_FOR_FEATURES = 75
 def compute_features(
     df: pd.DataFrame,
     btc_df: pd.DataFrame | None = None,
+    market_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Calcula todas las features tecnicas sobre un DataFrame de klines.
 
@@ -45,6 +46,10 @@ def compute_features(
     btc_df : pd.DataFrame | None
         Klines de BTCUSDT para calcular features de mercado.
         Si es None, las features de BTC no se calculan.
+    market_df : pd.DataFrame | None
+        DataFrame pre-calculado con features de mercado global
+        (market_pct_up_24, market_mean_roc_24, etc.).
+        Si es None, las features de mercado global no se añaden.
     """
     if len(df) < MIN_ROWS_FOR_FEATURES:
         return df.iloc[0:0].copy()
@@ -61,6 +66,9 @@ def compute_features(
     df = _add_time_features(df)
     if btc_df is not None and len(btc_df) >= MIN_ROWS_FOR_FEATURES:
         df = _add_btc_features(df, btc_df)
+
+    if market_df is not None:
+        df = _add_market_features(df, market_df)
 
     df = df.replace([np.inf, -np.inf], np.nan)
     df = df.dropna()
@@ -288,6 +296,59 @@ def _add_btc_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------------
+# Features de mercado global (cross-coin)
+# ------------------------------------------------------------------
+
+def compute_market_features(klines_by_symbol: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Calcula features agregadas de todo el mercado.
+
+    Recibe las klines de todas las monedas y devuelve un DataFrame indexado
+    por timestamp con métricas globales del mercado:
+    - % de monedas subiendo en 24h
+    - Retorno medio del mercado en 24h
+    - Dispersión de retornos (volatilidad cross-section)
+    - Volumen total del mercado (normalizado)
+    """
+    roc_24_frames: list[pd.Series] = []
+    vol_frames: list[pd.Series] = []
+
+    for symbol, df in klines_by_symbol.items():
+        if len(df) < 25:
+            continue
+        roc_24 = df["close"].pct_change(periods=24).rename(symbol)
+        roc_24_frames.append(roc_24)
+        vol_frames.append(df["volume"].rename(symbol))
+
+    if not roc_24_frames:
+        return pd.DataFrame()
+
+    roc_matrix = pd.concat(roc_24_frames, axis=1)
+    vol_matrix = pd.concat(vol_frames, axis=1)
+
+    market = pd.DataFrame(index=roc_matrix.index)
+    # % de monedas con retorno positivo en 24h
+    market["market_pct_up_24"] = (roc_matrix > 0).sum(axis=1) / roc_matrix.count(axis=1)
+    # Retorno medio del mercado
+    market["market_mean_roc_24"] = roc_matrix.mean(axis=1)
+    # Dispersión de retornos (std cross-section)
+    market["market_dispersion_24"] = roc_matrix.std(axis=1)
+    # Volumen total normalizado (z-score rolling 72h)
+    total_vol = vol_matrix.sum(axis=1)
+    vol_mean = total_vol.rolling(window=72, min_periods=24).mean()
+    vol_std = total_vol.rolling(window=72, min_periods=24).std()
+    market["market_vol_zscore"] = np.where(vol_std > 0, (total_vol - vol_mean) / vol_std, 0.0)
+
+    return market
+
+
+def _add_market_features(df: pd.DataFrame, market_df: pd.DataFrame) -> pd.DataFrame:
+    """Añade features de mercado global pre-calculadas al DataFrame de una moneda."""
+    for col in market_df.columns:
+        df[col] = market_df[col].reindex(df.index, method="ffill")
+    return df
+
+
+# ------------------------------------------------------------------
 # Lista de feature columns
 # ------------------------------------------------------------------
 
@@ -345,5 +406,13 @@ def get_feature_columns(include_btc: bool = True) -> list[str]:
             "coin_btc_corr_24",
             "btc_dominance_proxy", "relative_perf_btc_24",
         ])
+
+    # Features de mercado global
+    base.extend([
+        "market_pct_up_24",
+        "market_mean_roc_24",
+        "market_dispersion_24",
+        "market_vol_zscore",
+    ])
 
     return base
