@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from binance.exceptions import BinanceAPIException
+
 from src.config import AppConfig
 from src.data.binance_client import BinanceTradingClient
 from src.portfolio.manager import TradeAction
@@ -159,6 +161,29 @@ class OrderExecutor:
             )
             return result
 
+        except BinanceAPIException as exc:
+            # -2010: symbol not permitted (restricción regional)
+            # -1013: lot size / min notional no cumplido
+            if exc.code in (-2010, -1013):
+                logger.warning(
+                    "[SKIP] %s %s omitida (Binance %d): %s",
+                    action.action,
+                    action.symbol,
+                    exc.code,
+                    exc.message,
+                )
+            else:
+                logger.error(
+                    "[LIVE] Error Binance %s %s: %s",
+                    action.action,
+                    action.symbol,
+                    exc,
+                )
+            return ExecutionResult(
+                action=action,
+                success=False,
+                error=str(exc),
+            )
         except Exception as exc:
             logger.error("[LIVE] Error ejecutando %s %s: %s", action.action, action.symbol, exc)
             return ExecutionResult(
