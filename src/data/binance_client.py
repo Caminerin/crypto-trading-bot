@@ -17,6 +17,7 @@ Estrategia de conexión (para datos de mercado):
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -151,10 +152,7 @@ class BinanceDataClient:
             )
             return
 
-        logger.error(
-            "No se pudo conectar a Binance por ningún método "
-            "(Client ni HTTP directo)."
-        )
+        logger.error("No se pudo conectar a Binance por ningún método (Client ni HTTP directo).")
 
     @property
     def is_connected(self) -> bool:
@@ -198,9 +196,7 @@ class BinanceDataClient:
             if t["symbol"].endswith(quote)
             and not t["symbol"].startswith(("USDC", "BUSD", "TUSD", "FDUSD", "DAI"))
         ]
-        sorted_tickers = sorted(
-            usdt_tickers, key=lambda t: float(t["quoteVolume"]), reverse=True
-        )
+        sorted_tickers = sorted(usdt_tickers, key=lambda t: float(t["quoteVolume"]), reverse=True)
         return [t["symbol"] for t in sorted_tickers[:top_n]]
 
     def get_klines(
@@ -304,6 +300,52 @@ class BinanceTradingClient:
                 balances[b["asset"]] = free
         return balances
 
+    # Activos fiat que no tienen par USDT en Binance
+    _FIAT_ASSETS = frozenset(
+        {
+            "EUR",
+            "USD",
+            "GBP",
+            "TRY",
+            "BRL",
+            "ARS",
+            "RUB",
+            "UAH",
+            "NGN",
+            "AUD",
+            "JPY",
+            "KRW",
+            "INR",
+            "PLN",
+            "RON",
+            "CZK",
+            "HUF",
+            "BGN",
+            "SEK",
+            "NOK",
+            "DKK",
+            "CHF",
+            "CAD",
+            "NZD",
+            "MXN",
+            "ZAR",
+            "SGD",
+            "HKD",
+            "TWD",
+            "THB",
+            "IDR",
+            "PHP",
+            "VND",
+            "MYR",
+            "PKR",
+            "BDT",
+            "EGP",
+            "CLP",
+            "COP",
+            "PEN",
+        }
+    )
+
     def get_portfolio_value_usdt(self) -> float:
         """Valor total de la cartera en USDT."""
         portfolio = self.get_portfolio()
@@ -311,11 +353,11 @@ class BinanceTradingClient:
         for asset, qty in portfolio.items():
             if asset in ("USDT", "USDC", "BUSD", "FDUSD"):
                 total += qty
+            elif asset in self._FIAT_ASSETS:
+                logger.info("Ignorando activo fiat %s (%.4f) para valoración", asset, qty)
             else:
                 try:
-                    price = float(
-                        self._client.get_symbol_ticker(symbol=f"{asset}USDT")["price"]
-                    )
+                    price = float(self._client.get_symbol_ticker(symbol=f"{asset}USDT")["price"])
                     total += qty * price
                 except BinanceAPIException:
                     logger.warning("No se pudo valorar %s en USDT", asset)
@@ -376,9 +418,87 @@ class BinanceTradingClient:
             logger.error("Error al colocar OCO para %s: %s", symbol, exc)
             return None
 
-    def get_symbol_info(self, symbol: str) -> dict[str, Any]:
+    def get_symbol_info(self, symbol: str) -> dict[str, Any] | None:
         """Devuelve la info de un símbolo (filtros de precio, cantidad, etc.)."""
         return self._client.get_symbol_info(symbol)
+
+    def get_lot_size_filter(self, symbol: str) -> dict[str, float] | None:
+        """Devuelve min_qty, max_qty y step_size de un símbolo.
+
+        Retorna None si el símbolo no existe.
+        """
+        info = self.get_symbol_info(symbol)
+        if not info:
+            return None
+        for f in info.get("filters", []):
+            if f["filterType"] == "LOT_SIZE":
+                return {
+                    "min_qty": float(f["minQty"]),
+                    "max_qty": float(f["maxQty"]),
+                    "step_size": float(f["stepSize"]),
+                }
+        return None
+
+    def get_min_notional(self, symbol: str) -> float:
+        """Devuelve el valor mínimo en USDT para una orden (MIN_NOTIONAL)."""
+        info = self.get_symbol_info(symbol)
+        if not info:
+            return 10.0  # fallback conservador
+        for f in info.get("filters", []):
+            if f["filterType"] in ("MIN_NOTIONAL", "NOTIONAL"):
+                return float(f.get("minNotional", 10.0))
+        return 10.0
+
+    def round_to_step_size(self, quantity: float, step_size: float) -> float:
+        """Redondea la cantidad hacia abajo al step_size más cercano."""
+        if step_size <= 0:
+            return quantity
+        precision = max(0, int(round(-math.log10(step_size))))
+        rounded = math.floor(quantity / step_size) * step_size
+        return round(rounded, precision)
+
+    def validate_and_adjust_sell(
+        self,
+        symbol: str,
+        quantity: float,
+    ) -> tuple[float, str]:
+        """Valida y ajusta una orden de venta.
+
+        Retorna (adjusted_qty, error_msg).
+        Si error_msg no está vacío, la orden no debe ejecutarse.
+        """
+        lot_filter = self.get_lot_size_filter(symbol)
+        if lot_filter is None:
+            return 0.0, f"Symbol {symbol} no encontrado en Binance"
+
+        step_size = lot_filter["step_size"]
+        min_qty = lot_filter["min_qty"]
+
+        adjusted = self.round_to_step_size(quantity, step_size)
+
+        if adjusted < min_qty:
+            return 0.0, (f"Cantidad {quantity:.8f} < mínimo {min_qty:.8f} para {symbol}")
+
+        return adjusted, ""
+
+    def validate_buy(
+        self,
+        symbol: str,
+        quote_qty: float,
+    ) -> str:
+        """Valida una orden de compra.
+
+        Retorna cadena vacía si es válida, o el mensaje de error.
+        """
+        info = self.get_symbol_info(symbol)
+        if info is None:
+            return f"Symbol {symbol} no encontrado en Binance"
+
+        min_notional = self.get_min_notional(symbol)
+        if quote_qty < min_notional:
+            return f"Monto {quote_qty:.2f} USDT < mínimo {min_notional:.2f} para {symbol}"
+
+        return ""
 
     def cancel_open_orders(self, symbol: str) -> list[dict[str, Any]]:
         """Cancela todas las órdenes abiertas de un símbolo."""
@@ -386,9 +506,7 @@ class BinanceTradingClient:
             orders = self._client.get_open_orders(symbol=symbol)
             cancelled = []
             for order in orders:
-                result = self._client.cancel_order(
-                    symbol=symbol, orderId=order["orderId"]
-                )
+                result = self._client.cancel_order(symbol=symbol, orderId=order["orderId"])
                 cancelled.append(result)
             return cancelled
         except BinanceAPIException as exc:
