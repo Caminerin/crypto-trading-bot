@@ -121,12 +121,17 @@ def run_backtest(
     sl_pct: float,
     max_positions: int,
     quote: str,
+    *,
+    skip_train: bool = False,
 ) -> BacktestResult:
     """Simula la estrategia de prediccion sobre datos historicos.
 
     Divide los datos: primera mitad para entrenar, segunda mitad para simular.
     Cada 24 horas (simulando ejecucion 2x/dia), genera predicciones
     y compra si la probabilidad supera el threshold.
+
+    Si *skip_train* es True, se asume que el predictor ya esta entrenado
+    y se salta el paso de entrenamiento (util para sweep de thresholds).
     """
     result = BacktestResult(initial_budget=budget)
     positions: list[BTPosition] = []
@@ -160,16 +165,17 @@ def run_backtest(
         if len(train_df) >= 48:
             train_klines[symbol] = train_df
 
-    if len(train_klines) < 5:
-        print("Error: muy pocas monedas con datos suficientes para entrenar.")
-        return result
+    if not skip_train:
+        if len(train_klines) < 5:
+            print("Error: muy pocas monedas con datos suficientes para entrenar.")
+            return result
 
-    # Entrenar modelo
-    print(f"\n  Entrenando modelo con {len(train_klines)} monedas...")
-    metrics = predictor.train(train_klines)
-    print(f"  AUC CV: {metrics['mean_auc']:.4f}")
-    print(f"  Precision: {metrics.get('cv_precision_1', 0):.1%}")
-    print(f"  Recall: {metrics.get('cv_recall_1', 0):.1%}")
+        # Entrenar modelo
+        print(f"\n  Entrenando modelo con {len(train_klines)} monedas...")
+        metrics = predictor.train(train_klines)
+        print(f"  AUC CV: {metrics['mean_auc']:.4f}")
+        print(f"  Precision: {metrics.get('cv_precision_1', 0):.1%}")
+        print(f"  Recall: {metrics.get('cv_recall_1', 0):.1%}")
 
     # Simular dia a dia sobre la segunda mitad
     sim_timestamps = [ts for ts in sorted_ts if ts > mid_point]
@@ -464,6 +470,50 @@ def print_report(result: BacktestResult, days: int, threshold: float) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
+def print_sweep_table(sweep_results: list[dict]) -> None:
+    """Imprime tabla comparativa de multiples thresholds."""
+    print()
+    print("=" * 80)
+    print("  COMPARATIVA DE THRESHOLDS")
+    print("=" * 80)
+    print()
+    header = (
+        f"  {'Threshold':>10s} | {'Trades':>7s} | {'Wins':>5s} | "
+        f"{'Losses':>7s} | {'Win%':>5s} | {'P&L':>10s} | "
+        f"{'P&L%':>7s} | {'MaxDD':>6s}"
+    )
+    print(header)
+    print("  " + "-" * 76)
+    for row in sweep_results:
+        wr = (
+            f"{row['wins'] / row['sells'] * 100:.0f}%"
+            if row["sells"] > 0 else "N/A"
+        )
+        s = "+" if row["pnl"] >= 0 else ""
+        print(
+            f"  {row['threshold']:>9.0%} | {row['trades']:>7d} | "
+            f"{row['wins']:>5d} | {row['losses']:>7d} | "
+            f"{wr:>5s} | {s}${row['pnl']:>8.2f} | "
+            f"{s}{row['pnl_pct']:>6.1f}% | "
+            f"-{row['max_dd']:.1f}%"
+        )
+    print()
+    print("=" * 80)
+    # Highlight best threshold
+    profitable = [r for r in sweep_results if r["trades"] > 0]
+    if profitable:
+        best = max(profitable, key=lambda r: r["pnl"])
+        print(
+            f"  >> Mejor resultado: threshold={best['threshold']:.0%}"
+            f" con {best['trades']} trades,"
+            f" P&L={'+' if best['pnl'] >= 0 else ''}${best['pnl']:.2f}"
+            f" ({'+' if best['pnl_pct'] >= 0 else ''}{best['pnl_pct']:.1f}%)"
+        )
+    else:
+        print("  >> Ningun threshold produjo trades.")
+    print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backtest estrategia prediccion ML")
     parser.add_argument(
@@ -493,6 +543,10 @@ def main() -> None:
     parser.add_argument(
         "--max-positions", type=int, default=5,
         help="Maximo posiciones simultaneas",
+    )
+    parser.add_argument(
+        "--sweep", action="store_true",
+        help="Ejecutar barrido de thresholds (10%%-65%%)",
     )
     args = parser.parse_args()
 
@@ -543,18 +597,98 @@ def main() -> None:
     # Crear predictor y ejecutar backtest
     predictor = PricePredictor(config.model)
 
-    result = run_backtest(
-        klines_by_symbol=klines_by_symbol,
-        predictor=predictor,
-        budget=args.budget,
-        threshold=args.threshold,
-        tp_pct=args.tp,
-        sl_pct=args.sl,
-        max_positions=args.max_positions,
-        quote=quote,
-    )
+    if args.sweep:
+        # Barrido de thresholds: entrena UNA vez, simula con cada threshold
+        sweep_thresholds = [0.08, 0.10, 0.12, 0.14, 0.16, 0.20, 0.30, 0.65]
+        sweep_results: list[dict] = []
 
-    print_report(result, args.days, args.threshold)
+        # Primera iteracion: entrena el modelo
+        first_thr = sweep_thresholds[0]
+        result = run_backtest(
+            klines_by_symbol=klines_by_symbol,
+            predictor=predictor,
+            budget=args.budget,
+            threshold=first_thr,
+            tp_pct=args.tp,
+            sl_pct=args.sl,
+            max_positions=args.max_positions,
+            quote=quote,
+        )
+        pnl_pct = (
+            (result.final_value - result.initial_budget)
+            / result.initial_budget * 100
+            if result.initial_budget > 0 else 0
+        )
+        sweep_results.append({
+            "threshold": first_thr,
+            "trades": result.total_trades,
+            "buys": result.buys,
+            "sells": result.sells,
+            "wins": result.wins,
+            "losses": result.losses,
+            "pnl": result.total_profit,
+            "pnl_pct": pnl_pct,
+            "max_dd": result.max_drawdown_pct,
+            "recos": result.recommendations_made,
+        })
+        print(
+            f"  Threshold {first_thr:.0%}: "
+            f"{result.total_trades} trades, "
+            f"P&L={'+'if result.total_profit>=0 else ''}"
+            f"${result.total_profit:.2f}"
+        )
+
+        # Resto de thresholds: reusar modelo entrenado
+        for thr in sweep_thresholds[1:]:
+            result = run_backtest(
+                klines_by_symbol=klines_by_symbol,
+                predictor=predictor,
+                budget=args.budget,
+                threshold=thr,
+                tp_pct=args.tp,
+                sl_pct=args.sl,
+                max_positions=args.max_positions,
+                quote=quote,
+                skip_train=True,
+            )
+            pnl_pct = (
+                (result.final_value - result.initial_budget)
+                / result.initial_budget * 100
+                if result.initial_budget > 0 else 0
+            )
+            sweep_results.append({
+                "threshold": thr,
+                "trades": result.total_trades,
+                "buys": result.buys,
+                "sells": result.sells,
+                "wins": result.wins,
+                "losses": result.losses,
+                "pnl": result.total_profit,
+                "pnl_pct": pnl_pct,
+                "max_dd": result.max_drawdown_pct,
+                "recos": result.recommendations_made,
+            })
+            print(
+                f"  Threshold {thr:.0%}: "
+                f"{result.total_trades} trades, "
+                f"P&L={'+'if result.total_profit>=0 else ''}"
+                f"${result.total_profit:.2f}"
+            )
+
+        print_sweep_table(sweep_results)
+    else:
+        result = run_backtest(
+            klines_by_symbol=klines_by_symbol,
+            predictor=predictor,
+            budget=args.budget,
+            threshold=args.threshold,
+            tp_pct=args.tp,
+            sl_pct=args.sl,
+            max_positions=args.max_positions,
+            quote=quote,
+        )
+
+        print_report(result, args.days, args.threshold)
 
 
 if __name__ == "__main__":
