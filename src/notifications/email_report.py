@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from src.config import DEFAULT_ASSET_POLICIES, DEFAULT_MOMENTUM_POLICIES, EmailConfig
+from src.config import _QUOTE, DEFAULT_ASSET_POLICIES, DEFAULT_MOMENTUM_POLICIES, EmailConfig
 from src.execution.executor import ExecutionResult
 from src.strategies.dca import DCAAction
 from src.utils.logger import get_logger
@@ -124,7 +124,7 @@ def _build_dca_policy_table() -> str:
     _cell = 'style="padding:6px;border:1px solid #ddd;text-align:center"'
     rows = ""
     for symbol, policy in sorted(DEFAULT_ASSET_POLICIES.items()):
-        coin = symbol.replace("USDT", "")
+        coin = symbol.replace(_QUOTE, "")
         rows += (
             "<tr>"
             f"<td {_cell}><strong>{coin}</strong></td>"
@@ -160,7 +160,7 @@ def _build_dca_actions_section(dca_actions: list[DCAAction]) -> str:
     for a in dca_actions:
         color = "#28a745" if a.action == "BUY" else "#dc3545"
         icon = "COMPRA" if a.action == "BUY" else "VENTA"
-        coin = a.symbol.replace("USDT", "")
+        coin = a.symbol.replace(_QUOTE, "")
         amount = f"${a.quote_qty:,.2f}" if a.action == "BUY" else f"{a.base_qty:.6f}"
         rows += (
             "<tr>"
@@ -214,7 +214,7 @@ def _build_dca_section(
         pos_rows += (
             "<tr>"
             f'<td style="padding:6px;border:1px solid #ddd">'
-            f'{p.get("symbol", "").replace("USDT", "")}</td>'
+            f'{p.get("symbol", "").replace(_QUOTE, "")}</td>'
             f'<td style="padding:6px;border:1px solid #ddd">${p.get("entry_price", 0):,.2f}</td>'
             f'<td style="padding:6px;border:1px solid #ddd">${p.get("current_price", 0):,.2f}</td>'
             f'<td style="padding:6px;border:1px solid #ddd">${p.get("invested", 0):,.2f}</td>'
@@ -272,7 +272,7 @@ def _build_momentum_policy_table() -> str:
     _cell = 'style="padding:6px;border:1px solid #ddd;text-align:center"'
     rows = ""
     for symbol, policy in sorted(DEFAULT_MOMENTUM_POLICIES.items()):
-        coin = symbol.replace("USDT", "")
+        coin = symbol.replace(_QUOTE, "")
         rows += (
             "<tr>"
             f"<td {_cell}><strong>{coin}</strong></td>"
@@ -322,7 +322,7 @@ def _build_momentum_section(momentum_summary: dict[str, object]) -> str:
         pos_rows += (
             "<tr>"
             f'<td style="padding:6px;border:1px solid #ddd">'
-            f'{p.get("symbol", "").replace("USDT", "")}</td>'
+            f'{p.get("symbol", "").replace(_QUOTE, "")}</td>'
             f'<td style="padding:6px;border:1px solid #ddd">${p.get("entry_price", 0):,.2f}</td>'
             f'<td style="padding:6px;border:1px solid #ddd">${p.get("current_price", 0):,.2f}</td>'
             f'<td style="padding:6px;border:1px solid #ddd">${p.get("invested", 0):,.2f}</td>'

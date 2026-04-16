@@ -358,8 +358,9 @@ class BinanceTradingClient:
     }
 
     def get_portfolio_value_usdt(self) -> float:
-        """Valor total de la cartera en USDT."""
+        """Valor total de la cartera en USD (usando USDT o USDC como referencia)."""
         portfolio = self.get_portfolio()
+        quote = self._portfolio_cfg.quote_asset
         total = 0.0
         for asset, qty in portfolio.items():
             if asset in ("USDT", "USDC", "BUSD", "FDUSD"):
@@ -384,10 +385,26 @@ class BinanceTradingClient:
                     )
             else:
                 try:
-                    price = float(self._client.get_symbol_ticker(symbol=f"{asset}USDT")["price"])
+                    price = float(
+                        self._client.get_symbol_ticker(
+                            symbol=f"{asset}{quote}",
+                        )["price"],
+                    )
                     total += qty * price
                 except BinanceAPIException:
-                    logger.warning("No se pudo valorar %s en USDT", asset)
+                    # Fallback: intentar con USDT si quote es otro
+                    if quote != "USDT":
+                        try:
+                            price = float(
+                                self._client.get_symbol_ticker(
+                                    symbol=f"{asset}USDT",
+                                )["price"],
+                            )
+                            total += qty * price
+                            continue
+                        except BinanceAPIException:
+                            pass
+                    logger.warning("No se pudo valorar %s", asset)
         return total
 
     # ------------------------------------------------------------------
@@ -395,8 +412,8 @@ class BinanceTradingClient:
     # ------------------------------------------------------------------
 
     def place_market_buy(self, symbol: str, quote_qty: float) -> dict[str, Any]:
-        """Compra a mercado gastando *quote_qty* USDT."""
-        logger.info("MARKET BUY %s por %.2f USDT", symbol, quote_qty)
+        """Compra a mercado gastando *quote_qty* del quote asset."""
+        logger.info("MARKET BUY %s por %.2f %s", symbol, quote_qty, self._portfolio_cfg.quote_asset)
         order = self._client.order_market_buy(
             symbol=symbol,
             quoteOrderQty=f"{quote_qty:.2f}",
@@ -523,7 +540,10 @@ class BinanceTradingClient:
 
         min_notional = self.get_min_notional(symbol)
         if quote_qty < min_notional:
-            return f"Monto {quote_qty:.2f} USDT < mínimo {min_notional:.2f} para {symbol}"
+            return (
+                f"Monto {quote_qty:.2f} {self._portfolio_cfg.quote_asset}"
+                f" < mínimo {min_notional:.2f} para {symbol}"
+            )
 
         return ""
 

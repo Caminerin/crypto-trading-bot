@@ -15,7 +15,7 @@ from typing import Any
 
 from flask import Flask, jsonify, render_template
 
-from src.config import DEFAULT_ASSET_POLICIES, AllocationConfig
+from src.config import _QUOTE, DEFAULT_ASSET_POLICIES, AllocationConfig
 
 # ---------------------------------------------------------------------------
 # Rutas a ficheros de datos
@@ -204,7 +204,7 @@ def dca() -> str:
     # Política por activo
     policies = []
     for symbol, policy in DEFAULT_ASSET_POLICIES.items():
-        clean_name = symbol.replace("USDT", "")
+        clean_name = symbol.replace(_QUOTE, "")
         policies.append({
             "symbol": symbol,
             "name": clean_name,

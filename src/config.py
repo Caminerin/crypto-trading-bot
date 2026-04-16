@@ -45,7 +45,7 @@ class PortfolioConfig:
     max_positions: int = 5
     max_pct_per_coin: float = 0.20  # 20%
     min_stablecoin_reserve: float = 0.10  # 10%
-    quote_asset: str = "USDT"
+    quote_asset: str = os.getenv("QUOTE_ASSET", "USDT")
 
 
 @dataclass(frozen=True)
@@ -75,33 +75,36 @@ class MomentumAssetPolicy:
     trend_days: int = 7        # Días para confirmar tendencia alcista
 
 
+# Quote asset configurado (USDT o USDC según el .env)
+_QUOTE = os.getenv("QUOTE_ASSET", "USDT")
+
 # Política óptima momentum por moneda (backtested 730d, 520 combos/moneda)
 DEFAULT_MOMENTUM_POLICIES: dict[str, MomentumAssetPolicy] = {
-    "BTCUSDT": MomentumAssetPolicy(
+    f"BTC{_QUOTE}": MomentumAssetPolicy(
         momentum_threshold=0.10,
         take_profit_pct=0.30,
         stop_loss_pct=-0.15,
         trend_days=3,
     ),
-    "ETHUSDT": MomentumAssetPolicy(
+    f"ETH{_QUOTE}": MomentumAssetPolicy(
         momentum_threshold=0.10,
         take_profit_pct=0.30,
         stop_loss_pct=-0.15,
         trend_days=14,
     ),
-    "BNBUSDT": MomentumAssetPolicy(
+    f"BNB{_QUOTE}": MomentumAssetPolicy(
         momentum_threshold=0.03,
         take_profit_pct=0.25,
         stop_loss_pct=-0.15,
         trend_days=3,
     ),
-    "SOLUSDT": MomentumAssetPolicy(
+    f"SOL{_QUOTE}": MomentumAssetPolicy(
         momentum_threshold=0.07,
         take_profit_pct=0.20,
         stop_loss_pct=-0.15,
         trend_days=3,
     ),
-    "XRPUSDT": MomentumAssetPolicy(
+    f"XRP{_QUOTE}": MomentumAssetPolicy(
         momentum_threshold=0.05,
         take_profit_pct=0.25,
         stop_loss_pct=-0.03,
@@ -112,17 +115,17 @@ DEFAULT_MOMENTUM_POLICIES: dict[str, MomentumAssetPolicy] = {
 
 # Política óptima por moneda (backtested 365d, 84 combos/moneda)
 DEFAULT_ASSET_POLICIES: dict[str, DCAAssetPolicy] = {
-    "BTCUSDT": DCAAssetPolicy(
+    f"BTC{_QUOTE}": DCAAssetPolicy(
         dip_threshold=-0.07,
         take_profit_pct=0.175,
         stop_loss_pct=-0.105,
     ),
-    "ETHUSDT": DCAAssetPolicy(
+    f"ETH{_QUOTE}": DCAAssetPolicy(
         dip_threshold=-0.05,
         take_profit_pct=0.10,
         stop_loss_pct=-0.075,
     ),
-    "BNBUSDT": DCAAssetPolicy(
+    f"BNB{_QUOTE}": DCAAssetPolicy(
         dip_threshold=-0.04,
         take_profit_pct=0.20,
         stop_loss_pct=-0.08,
@@ -135,7 +138,9 @@ class DCAConfig:
     """Parametros de la estrategia DCA Inteligente."""
 
     enabled: bool = True
-    assets: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "BNBUSDT")
+    assets: tuple[str, ...] = (
+        f"BTC{_QUOTE}", f"ETH{_QUOTE}", f"BNB{_QUOTE}",
+    )
     # Parametros globales (fallback si no hay politica por moneda)
     dip_threshold: float = -0.05
     take_profit_pct: float = 0.15
@@ -148,7 +153,10 @@ class MomentumConfig:
     """Parámetros de la estrategia Momentum."""
 
     enabled: bool = True
-    assets: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")
+    assets: tuple[str, ...] = (
+        f"BTC{_QUOTE}", f"ETH{_QUOTE}", f"BNB{_QUOTE}",
+        f"SOL{_QUOTE}", f"XRP{_QUOTE}",
+    )
     # Parámetros globales (fallback si no hay política por moneda)
     momentum_threshold: float = 0.05
     take_profit_pct: float = 0.10

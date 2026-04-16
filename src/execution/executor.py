@@ -44,7 +44,7 @@ class OrderExecutor:
         """Ejecuta una lista de acciones y devuelve los resultados."""
         results: list[ExecutionResult] = []
 
-        # Ejecutar ventas primero para liberar USDT
+        # Ejecutar ventas primero para liberar quote asset
         sells = [a for a in actions if a.action == "SELL"]
         buys = [a for a in actions if a.action == "BUY"]
 
@@ -87,10 +87,33 @@ class OrderExecutor:
 
         try:
             if action.action == "SELL":
+                # Leer balance real de Binance (evita problemas por
+                # comisiones que reducen la cantidad disponible).
+                sell_qty = action.base_qty
+                try:
+                    portfolio = self._client.get_portfolio()
+                    quote = self._config.portfolio.quote_asset
+                    base_asset = action.symbol.replace(quote, "")
+                    real_balance = portfolio.get(base_asset, 0.0)
+                    if real_balance > 0:
+                        sell_qty = real_balance
+                        logger.info(
+                            "SELL %s: usando balance real %.8f (teórico %.8f)",
+                            action.symbol,
+                            real_balance,
+                            action.base_qty,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "No se pudo leer balance real de %s: %s",
+                        action.symbol,
+                        exc,
+                    )
+
                 # Validar y ajustar cantidad al step_size de Binance
                 adjusted_qty, error = self._client.validate_and_adjust_sell(
                     action.symbol,
-                    action.base_qty,
+                    sell_qty,
                 )
                 if error:
                     logger.warning(

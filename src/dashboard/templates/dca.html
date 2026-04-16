@@ -38,14 +38,14 @@
                     <th>Moneda</th>
                     <th>Precio entrada</th>
                     <th>Cantidad</th>
-                    <th>Invertido (USDT)</th>
+                    <th>Invertido ($)</th>
                     <th>Fecha entrada</th>
                 </tr>
             </thead>
             <tbody>
                 {% for pos in positions %}
                 <tr>
-                    <td><strong>{{ pos.symbol.replace("USDT", "") }}</strong></td>
+                    <td><strong>{{ pos.symbol[:-4] }}</strong></td>
                     <td>${{ "%.2f" | format(pos.entry_price) }}</td>
                     <td>{{ "%.8f" | format(pos.quantity) }}</td>
                     <td>${{ "%.2f" | format(pos.invested_usdt) }}</td>
