@@ -59,13 +59,11 @@ def run_daily(config: AppConfig | None = None) -> None:
 
     if not is_paper:
         try:
-            trading_client = BinanceTradingClient(
-                config.binance, config.portfolio, config.risk
-            )
+            trading_client = BinanceTradingClient(config.binance, config.portfolio, config.risk)
         except Exception as exc:
             logger.warning(
-                "No se pudo crear BinanceTradingClient: %s. "
-                "Cayendo a modo paper.", exc,
+                "No se pudo crear BinanceTradingClient: %s. Cayendo a modo paper.",
+                exc,
             )
             is_paper = True
 
@@ -87,12 +85,13 @@ def run_daily(config: AppConfig | None = None) -> None:
             total_value_before = trading_client.get_portfolio_value_usdt()
             logger.info(
                 "Cartera actual: %s | Valor: $%.2f",
-                portfolio_before, total_value_before,
+                portfolio_before,
+                total_value_before,
             )
         except Exception as exc:
             logger.warning(
-                "Error conectando con Binance para leer cartera: %s. "
-                "Cayendo a modo paper.", exc,
+                "Error conectando con Binance para leer cartera: %s. Cayendo a modo paper.",
+                exc,
             )
             is_paper = True
             trading_client = None
@@ -152,9 +151,7 @@ def run_daily(config: AppConfig | None = None) -> None:
         logger.warning("Error obteniendo datos de Binance: %s", exc)
         if not is_paper:
             raise
-        logger.info(
-            "[PAPER] Continuando sin datos reales (primera ejecución)"
-        )
+        logger.info("[PAPER] Continuando sin datos reales (primera ejecución)")
 
     # ------------------------------------------------------------------
     # 5. Entrenar o cargar modelo
@@ -198,8 +195,7 @@ def run_daily(config: AppConfig | None = None) -> None:
         predictions = predictor.predict(klines)
         recommendations = predictor.get_recommendations(predictions)
         logger.info(
-            "Predicciones: %d monedas analizadas "
-            "| %d recomendadas (umbral=%.0f%%)",
+            "Predicciones: %d monedas analizadas | %d recomendadas (umbral=%.0f%%)",
             len(predictions),
             len(recommendations),
             config.model.confidence_threshold * 100,
@@ -208,8 +204,7 @@ def run_daily(config: AppConfig | None = None) -> None:
             logger.info("  %s — prob=%.1f%%", sym, prob * 100)
     else:
         logger.info(
-            "Sin predicciones disponibles "
-            "(modelo=%s, datos=%d monedas)",
+            "Sin predicciones disponibles (modelo=%s, datos=%d monedas)",
             "listo" if model_ready else "no disponible",
             len(klines),
         )
@@ -222,6 +217,18 @@ def run_daily(config: AppConfig | None = None) -> None:
             current_prices[sym] = data_client.get_current_price(sym)
         except Exception:
             pass
+
+    # Obtener precios de posiciones actuales (para filtrar dust)
+    if not is_paper:
+        stablecoins = {"USDT", "USDC", "BUSD", "FDUSD", "DAI", "TUSD"}
+        for asset in portfolio_before:
+            if asset not in stablecoins:
+                symbol = f"{asset}USDT"
+                if symbol not in current_prices:
+                    try:
+                        current_prices[symbol] = data_client.get_current_price(symbol)
+                    except Exception:
+                        pass
 
     actions = portfolio_mgr.decide_actions(
         current_portfolio=portfolio_before,
@@ -237,7 +244,9 @@ def run_daily(config: AppConfig | None = None) -> None:
     pred_results = executor.execute(actions)
     successful = sum(1 for r in pred_results if r.success)
     logger.info(
-        "Ordenes prediccion: %d/%d exitosas", successful, len(pred_results),
+        "Ordenes prediccion: %d/%d exitosas",
+        successful,
+        len(pred_results),
     )
 
     # ------------------------------------------------------------------
@@ -280,21 +289,30 @@ def run_daily(config: AppConfig | None = None) -> None:
             if is_paper:
                 logger.info(
                     "[PAPER DCA] %s %s | $%.2f | reason=%s",
-                    dca_action.action, dca_action.symbol,
-                    dca_action.quote_qty, dca_action.reason,
+                    dca_action.action,
+                    dca_action.symbol,
+                    dca_action.quote_qty,
+                    dca_action.reason,
                 )
                 if dca_action.action == "BUY":
                     price = dca_prices.get(dca_action.symbol, 0)
                     if price > 0:
                         qty = dca_action.quote_qty / price
                         dca_strategy.record_buy(
-                            dca_action.symbol, price, qty, dca_action.quote_qty,
+                            dca_action.symbol,
+                            price,
+                            qty,
+                            dca_action.quote_qty,
                         )
                 elif dca_action.action == "SELL":
                     dca_strategy.record_sell(dca_action.symbol)
             else:
                 _execute_dca_live(
-                    dca_action, executor, dca_strategy, allocator, dca_prices,
+                    dca_action,
+                    executor,
+                    dca_strategy,
+                    allocator,
+                    dca_prices,
                 )
 
         # Resumen DCA para el email
@@ -330,20 +348,26 @@ def run_daily(config: AppConfig | None = None) -> None:
         daily_closes: dict[str, list[float]] = {}
         try:
             momentum_prices = _get_dca_prices(
-                data_client, list(config.momentum.assets),
+                data_client,
+                list(config.momentum.assets),
             )
             momentum_changes_24h = _get_24h_changes(
-                data_client, list(config.momentum.assets),
+                data_client,
+                list(config.momentum.assets),
             )
             daily_closes = _get_daily_closes(
-                data_client, list(config.momentum.assets), days=14,
+                data_client,
+                list(config.momentum.assets),
+                days=14,
             )
         except Exception as exc:
             logger.warning("Error obteniendo datos Momentum: %s", exc)
 
         # Evaluar y generar acciones Momentum
         momentum_actions = momentum_strategy.evaluate(
-            momentum_changes_24h, momentum_prices, daily_closes,
+            momentum_changes_24h,
+            momentum_prices,
+            daily_closes,
         )
         logger.info("Acciones Momentum: %d", len(momentum_actions))
 
@@ -352,22 +376,30 @@ def run_daily(config: AppConfig | None = None) -> None:
             if is_paper:
                 logger.info(
                     "[PAPER MOMENTUM] %s %s | $%.2f | reason=%s",
-                    m_action.action, m_action.symbol,
-                    m_action.quote_qty, m_action.reason,
+                    m_action.action,
+                    m_action.symbol,
+                    m_action.quote_qty,
+                    m_action.reason,
                 )
                 if m_action.action == "BUY":
                     price = momentum_prices.get(m_action.symbol, 0)
                     if price > 0:
                         qty = m_action.quote_qty / price
                         momentum_strategy.record_buy(
-                            m_action.symbol, price, qty, m_action.quote_qty,
+                            m_action.symbol,
+                            price,
+                            qty,
+                            m_action.quote_qty,
                         )
                 elif m_action.action == "SELL":
                     momentum_strategy.record_sell(m_action.symbol)
             else:
                 _execute_momentum_live(
-                    m_action, executor, momentum_strategy,
-                    allocator, momentum_prices,
+                    m_action,
+                    executor,
+                    momentum_strategy,
+                    allocator,
+                    momentum_prices,
                 )
 
         # Resumen Momentum para el email
@@ -400,13 +432,16 @@ def run_daily(config: AppConfig | None = None) -> None:
         )
         if active_pct > 0:
             allocator.add_profit(
-                "prediction", pnl * config.allocation.prediction_pct / active_pct,
+                "prediction",
+                pnl * config.allocation.prediction_pct / active_pct,
             )
             allocator.add_profit(
-                "dca", pnl * config.allocation.dca_pct / active_pct,
+                "dca",
+                pnl * config.allocation.dca_pct / active_pct,
             )
             allocator.add_profit(
-                "momentum", pnl * config.allocation.momentum_pct / active_pct,
+                "momentum",
+                pnl * config.allocation.momentum_pct / active_pct,
             )
 
     # ------------------------------------------------------------------
@@ -437,7 +472,8 @@ def run_daily(config: AppConfig | None = None) -> None:
 
 
 def _get_dca_prices(
-    data_client: BinanceDataClient, symbols: list[str],
+    data_client: BinanceDataClient,
+    symbols: list[str],
 ) -> dict[str, float]:
     """Obtiene precios actuales para los activos DCA."""
     prices: dict[str, float] = {}
@@ -450,7 +486,8 @@ def _get_dca_prices(
 
 
 def _get_24h_changes(
-    data_client: BinanceDataClient, symbols: list[str],
+    data_client: BinanceDataClient,
+    symbols: list[str],
 ) -> dict[str, float]:
     """Calcula el cambio porcentual de precio en las ultimas 24h."""
     changes: dict[str, float] = {}
@@ -464,8 +501,10 @@ def _get_24h_changes(
                     changes[symbol] = (price_now - price_24h_ago) / price_24h_ago
                     logger.info(
                         "DCA %s cambio 24h: %.2f%% ($%.2f -> $%.2f)",
-                        symbol, changes[symbol] * 100,
-                        price_24h_ago, price_now,
+                        symbol,
+                        changes[symbol] * 100,
+                        price_24h_ago,
+                        price_now,
                     )
         except Exception as exc:
             logger.warning("Error calculando cambio 24h de %s: %s", symbol, exc)
@@ -473,20 +512,25 @@ def _get_24h_changes(
 
 
 def _get_daily_closes(
-    data_client: BinanceDataClient, symbols: list[str], days: int = 14,
+    data_client: BinanceDataClient,
+    symbols: list[str],
+    days: int = 14,
 ) -> dict[str, list[float]]:
     """Obtiene precios de cierre diarios para los últimos N días."""
     closes: dict[str, list[float]] = {}
     for symbol in symbols:
         try:
             klines = data_client.get_klines(
-                symbol, interval="1d", lookback_hours=days * 24,
+                symbol,
+                interval="1d",
+                lookback_hours=days * 24,
             )
             if len(klines) >= 2:
                 closes[symbol] = [float(row["close"]) for _, row in klines.iterrows()]
                 logger.info(
                     "Momentum %s: %d cierres diarios obtenidos",
-                    symbol, len(closes[symbol]),
+                    symbol,
+                    len(closes[symbol]),
                 )
         except Exception as exc:
             logger.warning("Error obteniendo cierres diarios de %s: %s", symbol, exc)
@@ -530,7 +574,9 @@ def _execute_momentum_live(
         error = results[0].error if results else "Sin resultado"
         logger.error(
             "Momentum %s %s fallo: %s",
-            m_action.action, m_action.symbol, error,
+            m_action.action,
+            m_action.symbol,
+            error,
         )
 
 
@@ -572,7 +618,10 @@ def _execute_dca_live(
     else:
         error = results[0].error if results else "Sin resultado"
         logger.error(
-            "DCA %s %s fallo: %s", dca_action.action, dca_action.symbol, error,
+            "DCA %s %s fallo: %s",
+            dca_action.action,
+            dca_action.symbol,
+            error,
         )
 
 
@@ -597,7 +646,8 @@ def run_train_only(config: AppConfig | None = None) -> None:
     predictor = PricePredictor(config.model)
 
     logger.info(
-        "Obteniendo top %d monedas...", config.model.top_n_coins,
+        "Obteniendo top %d monedas...",
+        config.model.top_n_coins,
     )
     top_symbols = data_client.get_top_coins_by_volume(
         config.model.top_n_coins,
@@ -620,7 +670,8 @@ def run_train_only(config: AppConfig | None = None) -> None:
     # Mostrar importancia de features
     importance = predictor.feature_importance()
     logger.info(
-        "Top 10 features:\n%s", importance.head(10).to_string(),
+        "Top 10 features:\n%s",
+        importance.head(10).to_string(),
     )
 
 

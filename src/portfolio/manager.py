@@ -121,9 +121,22 @@ class PortfolioManager:
         # ------------------------------------------------------------------
         # 1. VENTAS: posiciones que ya no están recomendadas
         # ------------------------------------------------------------------
+        # Umbral mínimo para intentar vender (evita dust / posiciones residuales)
+        _MIN_SELL_VALUE_USDT = 1.0
+
         for asset, qty in current_positions.items():
             if asset not in recommended_assets:
                 symbol = f"{asset}{quote}"
+                # Filtrar dust: si conocemos el precio y el valor < umbral, ignorar
+                price = current_prices.get(symbol, 0)
+                if price > 0 and qty * price < _MIN_SELL_VALUE_USDT:
+                    logger.info(
+                        "Dust ignorado: %s vale $%.4f (< $%.0f)",
+                        asset,
+                        qty * price,
+                        _MIN_SELL_VALUE_USDT,
+                    )
+                    continue
                 actions.append(
                     TradeAction(
                         action="SELL",
