@@ -29,6 +29,7 @@ import optuna
 import pandas as pd
 import xgboost as xgb
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
@@ -233,6 +234,7 @@ class PricePredictor:
     def __init__(self, config: ModelConfig) -> None:
         self._config = config
         self._model: VotingClassifier | None = None
+        self._calibrator: LogisticRegression | None = None
         self._feature_cols = get_feature_columns(include_btc=True)
         self._selected_features: list[str] | None = None
 
@@ -384,11 +386,35 @@ class PricePredictor:
         )
 
         # ----------------------------------------------------------
-        # Paso 4: Entrenamiento final con todos los datos
+        # Paso 4: Entrenamiento final + calibración Platt Scaling
         # ----------------------------------------------------------
-        logger.info("Paso 4/4: Entrenamiento final con todos los datos...")
+        logger.info("Paso 4/4: Entrenamiento final + calibración Platt Scaling...")
         self._model = _build_voting(best_params, spw)
         self._model.fit(X_sel, y)
+
+        # Platt Scaling: ajustar LogisticRegression sobre probabilidades
+        # de CV para mapear prob_raw -> prob_calibrada.
+        # Recogemos probabilidades out-of-fold del paso 3.
+        oof_probs = np.full(len(y), np.nan)
+        for train_idx, val_idx in tscv.split(X_sel):
+            X_tr, X_vl = X_sel.iloc[train_idx], X_sel.iloc[val_idx]
+            y_tr = y.iloc[train_idx]
+            tmp_ens = _build_voting(best_params, spw)
+            tmp_ens.fit(X_tr, y_tr)
+            oof_probs[val_idx] = tmp_ens.predict_proba(X_vl)[:, 1]
+
+        valid_mask = ~np.isnan(oof_probs)
+        self._calibrator = LogisticRegression(max_iter=1000)
+        self._calibrator.fit(
+            oof_probs[valid_mask].reshape(-1, 1),
+            y.values[valid_mask],
+        )
+        # Log de la calibración
+        raw_sample = np.array([0.05, 0.10, 0.15, 0.20, 0.25]).reshape(-1, 1)
+        cal_sample = self._calibrator.predict_proba(raw_sample)[:, 1]
+        logger.info("Calibración Platt Scaling ajustada:")
+        for raw_val, cal_val in zip(raw_sample.ravel(), cal_sample):
+            logger.info("  raw=%.2f -> calibrada=%.1f%%", raw_val, cal_val * 100)
 
         mean_auc = float(np.mean(auc_scores))
         # Usar metricas de CV (honestas), no de training
@@ -446,8 +472,16 @@ class PricePredictor:
                 if featured.empty:
                     continue
                 last_row = featured[feat_cols].iloc[[-1]]
-                prob = self._model.predict_proba(last_row)[0, 1]
-                predictions[symbol] = float(prob)
+                raw_prob = self._model.predict_proba(last_row)[0, 1]
+                if self._calibrator is not None:
+                    prob = float(
+                        self._calibrator.predict_proba(
+                            np.array([[raw_prob]]),
+                        )[0, 1]
+                    )
+                else:
+                    prob = float(raw_prob)
+                predictions[symbol] = prob
             except Exception as exc:
                 logger.warning("Error prediciendo %s: %s", symbol, exc)
 
@@ -495,6 +529,7 @@ class PricePredictor:
             raise RuntimeError("No hay modelo para guardar.")
         payload = {
             "model": self._model,
+            "calibrator": self._calibrator,
             "selected_features": self._selected_features,
         }
         joblib.dump(payload, save_path)
@@ -509,10 +544,12 @@ class PricePredictor:
         payload = joblib.load(load_path)
         if isinstance(payload, dict):
             self._model = payload["model"]
+            self._calibrator = payload.get("calibrator")
             self._selected_features = payload.get("selected_features")
         else:
             # Compatibilidad con modelos guardados antes del stacking
             self._model = payload
+            self._calibrator = None
             self._selected_features = None
         logger.info("Ensemble cargado desde %s", load_path)
 
