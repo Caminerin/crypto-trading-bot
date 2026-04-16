@@ -379,7 +379,7 @@ class PricePredictor:
             labels = create_labels(
                 featured, target_pct,
                 horizon=horizon,
-                stop_loss_pct=target_pct,
+                stop_loss_pct=self._config.stop_loss_pct,
             )
 
             # Eliminar filas sin label (ultimas *horizon* velas)

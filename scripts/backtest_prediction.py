@@ -7,7 +7,7 @@ Simula el comportamiento del bot predictivo sobre datos historicos:
 2. Entrena el modelo con la primera mitad de los datos.
 3. Recorre la segunda mitad dia a dia, generando predicciones.
 4. Compra cuando la probabilidad calibrada >= threshold.
-5. Vende por take-profit (+3%) o stop-loss (-3%).
+5. Vende por take-profit (+3%) o stop-loss (-5%).
 6. Reporta resultados.
 
 Uso:
@@ -553,8 +553,8 @@ def main() -> None:
         help="Take-profit (default 3%%)",
     )
     parser.add_argument(
-        "--sl", type=float, default=0.03,
-        help="Stop-loss (default 3%%)",
+        "--sl", type=float, default=0.05,
+        help="Stop-loss (default 5%%)",
     )
     parser.add_argument(
         "--max-positions", type=int, default=5,

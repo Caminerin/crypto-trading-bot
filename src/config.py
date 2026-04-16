@@ -30,7 +30,8 @@ class ModelConfig:
 
     top_n_coins: int = 75
     confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.65"))
-    target_pct_change: float = 0.03  # 3%
+    target_pct_change: float = 0.03  # 3% TP
+    stop_loss_pct: float = 0.05  # 5% SL para labels
     target_horizon_hours: int = 48
     lookback_hours: int = 120
     candle_interval: str = "1h"
@@ -52,7 +53,7 @@ class PortfolioConfig:
 class RiskConfig:
     """Parámetros de gestión de riesgo."""
 
-    stop_loss_pct: float = 0.03  # 3%
+    stop_loss_pct: float = 0.05  # 5%
     take_profit_pct: float = 0.03  # 3%
 
 
