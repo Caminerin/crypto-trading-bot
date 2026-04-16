@@ -346,6 +346,17 @@ class BinanceTradingClient:
         }
     )
 
+    # Tasas aproximadas fiat → USDT para valoración de cartera.
+    # Se usan solo cuando Binance no tiene par directo XXXUSDT.
+    _FIAT_TO_USDT: dict[str, float] = {
+        "EUR": 1.08,
+        "GBP": 1.26,
+        "CHF": 1.12,
+        "AUD": 0.64,
+        "CAD": 0.73,
+        "JPY": 0.0067,
+    }
+
     def get_portfolio_value_usdt(self) -> float:
         """Valor total de la cartera en USDT."""
         portfolio = self.get_portfolio()
@@ -354,7 +365,23 @@ class BinanceTradingClient:
             if asset in ("USDT", "USDC", "BUSD", "FDUSD"):
                 total += qty
             elif asset in self._FIAT_ASSETS:
-                logger.info("Ignorando activo fiat %s (%.4f) para valoración", asset, qty)
+                rate = self._FIAT_TO_USDT.get(asset, 0)
+                if rate > 0:
+                    value = qty * rate
+                    total += value
+                    logger.info(
+                        "Fiat %s: %.2f x %.4f = $%.2f (tasa aprox.)",
+                        asset,
+                        qty,
+                        rate,
+                        value,
+                    )
+                else:
+                    logger.info(
+                        "Fiat %s (%.4f) sin tasa conocida, no incluido",
+                        asset,
+                        qty,
+                    )
             else:
                 try:
                     price = float(self._client.get_symbol_ticker(symbol=f"{asset}USDT")["price"])
