@@ -527,6 +527,52 @@ class BinanceTradingClient:
 
         return ""
 
+    def convert_sell(self, from_asset: str, to_asset: str, amount: float) -> dict[str, Any]:
+        """Vende via Convert API (fallback cuando Spot da -2010).
+
+        Flujo: pedir quote → aceptar quote.
+        Devuelve dict con claves compatibles con el resultado de market sell.
+        """
+        logger.info(
+            "CONVERT SELL %s → %s qty=%.8f",
+            from_asset,
+            to_asset,
+            amount,
+        )
+        # 1. Pedir cotización
+        quote = self._client.convert_request_quote(
+            fromAsset=from_asset,
+            toAsset=to_asset,
+            fromAmount=f"{amount:.8f}",
+        )
+        quote_id = quote["quoteId"]
+        ratio = float(quote.get("ratio", 0))
+        logger.info(
+            "Convert quote recibida: id=%s ratio=%.8f",
+            quote_id,
+            ratio,
+        )
+
+        # 2. Aceptar cotización
+        result = self._client.convert_accept_quote(quoteId=quote_id)
+        logger.info("Convert aceptada: status=%s", result.get("orderStatus", "?"))
+
+        # 3. Devolver resultado normalizado (compatible con market sell)
+        to_amount = float(result.get("toAmount", 0))
+        from_amount_result = float(result.get("fromAmount", amount))
+        price = to_amount / from_amount_result if from_amount_result > 0 else 0
+
+        return {
+            "fills": [
+                {
+                    "qty": str(from_amount_result),
+                    "price": str(price),
+                    "commission": "0",
+                }
+            ],
+            "via": "convert",
+        }
+
     def cancel_open_orders(self, symbol: str) -> list[dict[str, Any]]:
         """Cancela todas las órdenes abiertas de un símbolo."""
         try:

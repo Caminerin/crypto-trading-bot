@@ -162,7 +162,9 @@ class OrderExecutor:
             return result
 
         except BinanceAPIException as exc:
-            # -2010: symbol not permitted (restricción regional)
+            # -2010 en SELL: intentar fallback via Convert API
+            if exc.code == -2010 and action.action == "SELL":
+                return self._try_convert_sell(action)
             # -1013: lot size / min notional no cumplido
             if exc.code in (-2010, -1013):
                 logger.warning(
@@ -190,4 +192,53 @@ class OrderExecutor:
                 action=action,
                 success=False,
                 error=str(exc),
+            )
+
+    def _try_convert_sell(self, action: TradeAction) -> ExecutionResult:
+        """Fallback: vender via Convert API cuando Spot da -2010."""
+        assert self._client is not None
+        quote = self._config.portfolio.quote_asset  # "USDT"
+        from_asset = action.symbol.replace(quote, "")
+
+        logger.info(
+            "[CONVERT FALLBACK] Intentando vender %s via Convert API...",
+            action.symbol,
+        )
+        try:
+            order = self._client.convert_sell(
+                from_asset=from_asset,
+                to_asset=quote,
+                amount=action.base_qty,
+            )
+            fills = order.get("fills", [])
+            total_qty = sum(float(f["qty"]) for f in fills)
+            total_commission = sum(float(f["commission"]) for f in fills)
+            avg_price = (
+                sum(float(f["price"]) * float(f["qty"]) for f in fills) / total_qty
+                if total_qty > 0
+                else 0.0
+            )
+            logger.info(
+                "[CONVERT] SELL %s OK | precio=%.8f | qty=%.8f",
+                action.symbol,
+                avg_price,
+                total_qty,
+            )
+            return ExecutionResult(
+                action=action,
+                success=True,
+                executed_qty=total_qty,
+                executed_price=avg_price,
+                commission=total_commission,
+            )
+        except Exception as convert_exc:
+            logger.warning(
+                "[CONVERT FALLBACK] También falló para %s: %s",
+                action.symbol,
+                convert_exc,
+            )
+            return ExecutionResult(
+                action=action,
+                success=False,
+                error=f"Spot: -2010 | Convert: {convert_exc}",
             )
