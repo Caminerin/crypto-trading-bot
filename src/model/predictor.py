@@ -287,8 +287,14 @@ class PricePredictor:
         if not all_X:
             raise ValueError("No hay suficientes datos para entrenar el modelo.")
 
-        X = pd.concat(all_X, ignore_index=True)
-        y = pd.concat(all_y, ignore_index=True)
+        # Concatenar preservando el indice temporal para evitar data leakage.
+        # Al ordenar por timestamp, TimeSeriesSplit respetara la cronologia
+        # real incluso mezclando datos de distintas monedas.
+        X = pd.concat(all_X)  # preservar indice temporal
+        y = pd.concat(all_y)
+        sort_order = X.index.argsort()
+        X = X.iloc[sort_order].reset_index(drop=True)
+        y = y.iloc[sort_order].reset_index(drop=True)
 
         logger.info(
             "Datos: %d muestras | positivas=%.1f%%",
@@ -353,6 +359,20 @@ class PricePredictor:
         for name, scores in per_model_auc.items():
             logger.info("%s AUC medio: %.4f", name, np.mean(scores))
 
+        # Guardar metricas del ultimo fold de CV (las mas honestas)
+        last_fold_idx = len(auc_scores) - 1
+        last_train_idx, last_val_idx = list(tscv.split(X_sel))[last_fold_idx]
+        X_val_last = X_sel.iloc[last_val_idx]
+        y_val_last = y.iloc[last_val_idx]
+
+        # Evaluar el ultimo ensemble de CV sobre su validation set
+        y_pred_cv = ensemble.predict(X_val_last)
+        cv_report = classification_report(y_val_last, y_pred_cv, output_dict=True)
+        logger.info(
+            "Metricas HONESTAS (ultimo fold CV, datos no vistos):\n%s",
+            classification_report(y_val_last, y_pred_cv),
+        )
+
         # ----------------------------------------------------------
         # Paso 4: Entrenamiento final con todos los datos
         # ----------------------------------------------------------
@@ -360,20 +380,15 @@ class PricePredictor:
         self._model = _build_voting(best_params, spw)
         self._model.fit(X_sel, y)
 
-        # Reporte
-        y_pred = self._model.predict(X_sel)
-        report = classification_report(y, y_pred, output_dict=True)
-        logger.info(
-            "Reporte final (voting):\n%s", classification_report(y, y_pred),
-        )
-
         mean_auc = float(np.mean(auc_scores))
+        # Usar metricas de CV (honestas), no de training
+        cv_cls1 = cv_report.get("1", {})
         metrics: dict[str, Any] = {
             "mean_auc": mean_auc,
-            "accuracy": report["accuracy"],
-            "precision_1": report["1"]["precision"],
-            "recall_1": report["1"]["recall"],
-            "f1_1": report["1"]["f1-score"],
+            "cv_accuracy": cv_report.get("accuracy", 0),
+            "cv_precision_1": cv_cls1.get("precision", 0),
+            "cv_recall_1": cv_cls1.get("recall", 0),
+            "cv_f1_1": cv_cls1.get("f1-score", 0),
             "samples": len(X_sel),
             "positive_rate": float(y.mean()),
             "n_features_original": len(self._feature_cols),
@@ -421,6 +436,23 @@ class PricePredictor:
                 predictions[symbol] = float(prob)
             except Exception as exc:
                 logger.warning("Error prediciendo %s: %s", symbol, exc)
+
+        # Log de distribucion de probabilidades para diagnostico
+        if predictions:
+            probs = sorted(predictions.values(), reverse=True)
+            logger.info(
+                "Distribucion de probabilidades: max=%.3f | p75=%.3f | "
+                "mediana=%.3f | p25=%.3f | min=%.3f",
+                probs[0],
+                probs[len(probs) // 4] if len(probs) >= 4 else probs[0],
+                probs[len(probs) // 2],
+                probs[3 * len(probs) // 4] if len(probs) >= 4 else probs[-1],
+                probs[-1],
+            )
+            # Top 5 monedas por probabilidad
+            top5 = sorted(predictions.items(), key=lambda x: x[1], reverse=True)[:5]
+            for sym, prob in top5:
+                logger.info("  Top: %s = %.3f (%.1f%%)", sym, prob, prob * 100)
 
         return predictions
 
