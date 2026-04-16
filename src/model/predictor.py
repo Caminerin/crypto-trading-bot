@@ -278,13 +278,19 @@ def _build_base_models(
     return {"lgbm": lgbm, "xgb": xgb_clf, "rf": rf, "et": et}
 
 
-def _compute_sample_weights(n_samples: int, half_life_days: int = 7) -> np.ndarray:
+def _compute_sample_weights(
+    n_samples: int,
+    half_life_days: int = 7,
+    rows_per_hour: int = 1,
+) -> np.ndarray:
     """Pesos exponenciales decrecientes: datos recientes pesan mas.
 
-    El peso se duplica cada *half_life_days* dias (asumiendo datos horarios
-    de multiples monedas, el indice ya esta ordenado cronologicamente).
+    El peso se duplica cada *half_life_days* dias.  *rows_per_hour*
+    indica cuantas filas hay por hora (= n_coins cuando los datos de
+    multiples monedas se intercalan por timestamp).
     """
-    decay = np.log(2) / (half_life_days * 24)
+    half_life_rows = half_life_days * 24 * rows_per_hour
+    decay = np.log(2) / max(half_life_rows, 1)
     positions = np.arange(n_samples, dtype=float)
     weights = np.exp(decay * (positions - n_samples + 1))
     weights /= weights.mean()
@@ -410,8 +416,10 @@ class PricePredictor:
         pos_count = int((y == 1).sum())
         spw = neg_count / max(pos_count, 1)
 
-        # Sample weights: datos recientes pesan mas
-        sample_w = _compute_sample_weights(len(X))
+        # Sample weights: datos recientes pesan mas.
+        # rows_per_hour = n_coins porque los datos estan intercalados por timestamp.
+        n_coins = len(klines_by_symbol)
+        sample_w = _compute_sample_weights(len(X), rows_per_hour=n_coins)
 
         # ----------------------------------------------------------
         # Paso 1: Optuna -- buscar mejores hiperparametros
@@ -696,8 +704,10 @@ class PricePredictor:
             total = imp.sum()
             if total > 0:
                 imp = imp / total
-            importances.append(imp)
+                importances.append(imp)
 
+        if not importances:
+            return pd.DataFrame({"feature": feat_cols, "importance": 0.0})
         avg_importance = np.mean(importances, axis=0)
         return (
             pd.DataFrame({"feature": feat_cols, "importance": avg_importance})
