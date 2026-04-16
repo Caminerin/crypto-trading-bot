@@ -28,7 +28,7 @@ from src.config import (
     load_config,
 )
 from src.data.binance_client import BinanceDataClient, BinanceTradingClient
-from src.execution.executor import OrderExecutor
+from src.execution.executor import OrderExecutor, load_restricted_symbols
 from src.model.predictor import PricePredictor
 from src.notifications.email_report import send_daily_report
 from src.portfolio.manager import PortfolioManager, TradeAction
@@ -230,8 +230,23 @@ def run_daily(config: AppConfig | None = None) -> None:
                     except Exception:
                         pass
 
+    # Filtrar activos con restricción de cuenta (blacklist persistente)
+    restricted = load_restricted_symbols()
+    portfolio_for_actions = portfolio_before
+    if restricted and not is_paper:
+        portfolio_for_actions = {
+            asset: qty
+            for asset, qty in portfolio_before.items()
+            if f"{asset}USDT" not in restricted
+            and asset not in ("USDT", "USDC", "BUSD", "FDUSD")
+            or asset in ("USDT", "USDC", "BUSD", "FDUSD")
+        }
+        skipped = set(portfolio_before) - set(portfolio_for_actions)
+        if skipped:
+            logger.info("Activos en blacklist (omitidos): %s", skipped)
+
     actions = portfolio_mgr.decide_actions(
-        current_portfolio=portfolio_before,
+        current_portfolio=portfolio_for_actions,
         total_value_usdt=prediction_budget,
         recommendations=recommendations,
         current_prices=current_prices,

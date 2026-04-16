@@ -7,17 +7,43 @@ Recibe las acciones del PortfolioManager y las ejecuta contra Binance
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from binance.exceptions import BinanceAPIException
 
-from src.config import AppConfig
+from src.config import BASE_DIR, AppConfig
 from src.data.binance_client import BinanceTradingClient
 from src.portfolio.manager import TradeAction
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Fichero donde se guardan los símbolos que Binance rechaza con -2010
+_RESTRICTED_FILE = BASE_DIR / "data" / "restricted_symbols.json"
+
+
+def load_restricted_symbols() -> set[str]:
+    """Carga los símbolos restringidos desde disco."""
+    if not _RESTRICTED_FILE.exists():
+        return set()
+    try:
+        data = json.loads(_RESTRICTED_FILE.read_text())
+        return set(data)
+    except (json.JSONDecodeError, OSError):
+        return set()
+
+
+def _save_restricted_symbol(symbol: str) -> None:
+    """Añade un símbolo a la blacklist persistente."""
+    _RESTRICTED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    current = load_restricted_symbols()
+    if symbol in current:
+        return
+    current.add(symbol)
+    _RESTRICTED_FILE.write_text(json.dumps(sorted(current), indent=2))
+    logger.info("Símbolo %s añadido a blacklist (%s)", symbol, _RESTRICTED_FILE)
 
 
 @dataclass
@@ -172,6 +198,8 @@ class OrderExecutor:
                     exc.code,
                     exc.message,
                 )
+                if exc.code == -2010:
+                    _save_restricted_symbol(action.symbol)
             else:
                 logger.error(
                     "[LIVE] Error Binance %s %s: %s",
