@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.config import DEFAULT_MOMENTUM_POLICIES, MomentumAssetPolicy
+from src.config import _QUOTE, DEFAULT_MOMENTUM_POLICIES, MomentumAssetPolicy
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -24,8 +24,8 @@ DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 MOMENTUM_POSITIONS_FILE = DATA_DIR / "momentum_positions.json"
 
-# Monedas objetivo para momentum
-MOMENTUM_ASSETS = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
+# Monedas objetivo para momentum (usa el quote asset configurado)
+MOMENTUM_ASSETS = [f"BTC{_QUOTE}", f"ETH{_QUOTE}", f"BNB{_QUOTE}"]
 
 # Umbrales globales (fallback — se usan si no hay política por moneda)
 MOMENTUM_THRESHOLD = 0.05   # Comprar cuando sube más del 5% en 24h

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.config import DEFAULT_ASSET_POLICIES, DCAAssetPolicy
+from src.config import _QUOTE, DEFAULT_ASSET_POLICIES, DCAAssetPolicy
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -24,8 +24,8 @@ DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 DCA_POSITIONS_FILE = DATA_DIR / "dca_positions.json"
 
-# Monedas objetivo para DCA
-DCA_ASSETS = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
+# Monedas objetivo para DCA (usa el quote asset configurado)
+DCA_ASSETS = [f"BTC{_QUOTE}", f"ETH{_QUOTE}", f"BNB{_QUOTE}"]
 
 # Umbrales globales (fallback — se usan si no hay politica por moneda)
 DIP_THRESHOLD = -0.05       # Comprar cuando cae mas del 5% en 24h

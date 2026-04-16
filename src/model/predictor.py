@@ -32,7 +32,7 @@ from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.metrics import classification_report, roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
-from src.config import MODELS_DIR, ModelConfig
+from src.config import _QUOTE, MODELS_DIR, ModelConfig
 from src.data.features import compute_features, get_feature_columns
 from src.utils.logger import get_logger
 
@@ -256,11 +256,12 @@ class PricePredictor:
         logger.info("Preparando datos de entrenamiento con %d monedas", len(klines_by_symbol))
 
         # Extraer BTC como proxy del mercado
-        btc_df = klines_by_symbol.get("BTCUSDT")
+        btc_symbol = f"BTC{_QUOTE}"
+        btc_df = klines_by_symbol.get(btc_symbol)
         if btc_df is not None:
-            logger.info("BTCUSDT disponible como proxy de mercado (%d filas)", len(btc_df))
+            logger.info("%s disponible como proxy de mercado (%d filas)", btc_symbol, len(btc_df))
         else:
-            logger.warning("BTCUSDT no encontrado -- features de BTC no disponibles")
+            logger.warning("%s no encontrado -- features de BTC no disponibles", btc_symbol)
 
         horizon = self._config.target_horizon_hours
         all_X: list[pd.DataFrame] = []
@@ -397,14 +398,14 @@ class PricePredictor:
     def predict(self, klines_by_symbol: dict[str, pd.DataFrame]) -> dict[str, float]:
         """Devuelve {symbol: probabilidad_subida} para cada moneda.
 
-        Extrae BTCUSDT del dict para features de mercado.
+        Extrae BTC del dict para features de mercado.
         Solo incluye la ultima fila de features de cada moneda
         (= estado actual del mercado).
         """
         if self._model is None:
             raise RuntimeError("El modelo no esta entrenado ni cargado.")
 
-        btc_df = klines_by_symbol.get("BTCUSDT")
+        btc_df = klines_by_symbol.get(f"BTC{_QUOTE}")
 
         # Usar features seleccionadas si estan disponibles
         feat_cols = self._selected_features or self._feature_cols

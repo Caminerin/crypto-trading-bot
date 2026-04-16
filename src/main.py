@@ -75,9 +75,10 @@ def run_daily(config: AppConfig | None = None) -> None:
     # 2. Obtener estado actual de la cartera
     # ------------------------------------------------------------------
     if is_paper:
-        portfolio_before: dict[str, float] = {"USDT": 1000.0}
+        quote = config.portfolio.quote_asset
+        portfolio_before: dict[str, float] = {quote: 1000.0}
         total_value_before = 1000.0
-        logger.info("[PAPER] Cartera simulada: 1000 USDT")
+        logger.info("[PAPER] Cartera simulada: 1000 %s", quote)
     else:
         assert trading_client is not None
         try:
@@ -96,7 +97,7 @@ def run_daily(config: AppConfig | None = None) -> None:
             is_paper = True
             trading_client = None
             executor = OrderExecutor(config, None)
-            portfolio_before = {"USDT": 1000.0}
+            portfolio_before = {config.portfolio.quote_asset: 1000.0}
             total_value_before = 1000.0
 
     # ------------------------------------------------------------------
@@ -134,6 +135,7 @@ def run_daily(config: AppConfig | None = None) -> None:
         )
         top_symbols = data_client.get_top_coins_by_volume(
             config.model.top_n_coins,
+            quote=config.portfolio.quote_asset,
         )
         logger.info("Top monedas obtenidas: %d", len(top_symbols))
 
@@ -221,9 +223,10 @@ def run_daily(config: AppConfig | None = None) -> None:
     # Obtener precios de posiciones actuales (para filtrar dust)
     if not is_paper:
         stablecoins = {"USDT", "USDC", "BUSD", "FDUSD", "DAI", "TUSD"}
+        quote = config.portfolio.quote_asset
         for asset in portfolio_before:
             if asset not in stablecoins:
-                symbol = f"{asset}USDT"
+                symbol = f"{asset}{quote}"
                 if symbol not in current_prices:
                     try:
                         current_prices[symbol] = data_client.get_current_price(symbol)

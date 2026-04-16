@@ -151,8 +151,8 @@ class PortfolioManager:
         # ------------------------------------------------------------------
         # 2. COMPRAS: nuevas recomendaciones
         # ------------------------------------------------------------------
-        # USDT disponible tras ventas (estimación)
-        usdt_available = current_portfolio.get("USDT", 0.0)
+        # Quote asset disponible tras ventas (estimación)
+        usdt_available = current_portfolio.get(quote, 0.0)
         for action in actions:
             if action.action == "SELL" and action.symbol in current_prices:
                 usdt_available += action.base_qty * current_prices[action.symbol]
