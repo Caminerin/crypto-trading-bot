@@ -35,7 +35,7 @@ class ModelConfig:
     lookback_hours: int = 120
     candle_interval: str = "1h"
     retrain_interval_days: int = 7
-    training_days: int = 180
+    training_days: int = 120
 
 
 @dataclass(frozen=True)
