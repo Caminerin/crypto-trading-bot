@@ -436,8 +436,10 @@ class PricePredictor:
         # ----------------------------------------------------------
         logger.info("Paso 3/4: Evaluando con Purged TimeSeriesSplit...")
 
-        n_coins = len(klines_by_symbol)
-        purge_gap = PURGE_GAP_HOURS * max(n_coins, 1)
+        # El gap es solo el horizonte de labeling (48h). Los datos ya estan
+        # ordenados por timestamp, asi que 48 filas ~= 48h de distintas monedas
+        # entrelazadas en el mismo instante.  No multiplicar por n_coins.
+        purge_gap = PURGE_GAP_HOURS
         splits = _purged_ts_split(len(X_sel), n_splits=3, gap=purge_gap)
 
         auc_scores: list[float] = []
@@ -459,10 +461,7 @@ class PricePredictor:
             # Entrenar cada modelo base por separado
             fold_probs = np.zeros((len(val_idx), len(model_names)))
             for m_idx, (name, model) in enumerate(base_models.items()):
-                if name in ("lgbm", "xgb"):
-                    model.fit(X_train, y_train, sample_weight=w_train)
-                else:
-                    model.fit(X_train, y_train)
+                model.fit(X_train, y_train, sample_weight=w_train)
 
                 y_prob_i = model.predict_proba(X_val)[:, 1]
                 fold_probs[:, m_idx] = y_prob_i
@@ -504,10 +503,7 @@ class PricePredictor:
         # Entrenar modelos base en todos los datos
         self._base_models = _build_base_models(best_params, spw)
         for name, model in self._base_models.items():
-            if name in ("lgbm", "xgb"):
-                model.fit(X_sel, y, sample_weight=sample_w)
-            else:
-                model.fit(X_sel, y)
+            model.fit(X_sel, y, sample_weight=sample_w)
 
         # Meta-learner: LogisticRegression sobre OOF probabilities
         valid_oof_mask = ~np.isnan(oof_probs).any(axis=1)
