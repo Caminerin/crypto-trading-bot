@@ -654,6 +654,7 @@ def run_train_only(config: AppConfig | None = None) -> None:
     )
     top_symbols = data_client.get_top_coins_by_volume(
         config.model.top_n_coins,
+        quote=config.portfolio.quote_asset,
     )
 
     logger.info(
