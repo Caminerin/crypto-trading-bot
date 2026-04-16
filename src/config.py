@@ -53,7 +53,7 @@ class RiskConfig:
     """Parámetros de gestión de riesgo."""
 
     stop_loss_pct: float = 0.03  # 3%
-    take_profit_pct: float = 0.05  # 5%
+    take_profit_pct: float = 0.03  # 3%
 
 
 @dataclass(frozen=True)
