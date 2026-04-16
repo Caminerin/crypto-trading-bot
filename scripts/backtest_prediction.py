@@ -202,30 +202,46 @@ def run_backtest(
         if len(pred_klines) < 5:
             continue
 
-        # 1. Revisar TP/SL de posiciones abiertas
+        # 1. Revisar TP/SL de posiciones abiertas.
+        #    Recorremos CADA vela horaria entre el step anterior y el actual
+        #    para simular como funcionan las OCO reales (trigger inmediato).
+        prev_ts = sim_steps[step_idx - 1] if step_idx > 0 else mid_point
         sells_to_remove: list[int] = []
         for idx, pos in enumerate(positions):
-            if pos.symbol not in pred_klines:
+            if pos.symbol not in klines_by_symbol:
                 continue
-            current_price = pred_klines[pos.symbol]["close"].iloc[-1]
+            sym_df = klines_by_symbol[pos.symbol]
+            entry_ts = pd.Timestamp(pos.entry_date)
+            check_start = max(entry_ts, prev_ts)
+            candles = sym_df[(sym_df.index > check_start) & (sym_df.index <= current_ts)]
 
-            pnl_pct = (current_price - pos.entry_price) / pos.entry_price
             sell_reason = ""
+            sell_price = 0.0
+            sell_ts = current_ts
 
-            if current_price >= pos.tp_price:
-                sell_reason = "TP"
-                result.take_profits += 1
-            elif current_price <= pos.sl_price:
-                sell_reason = "SL"
-                result.stop_losses += 1
+            for candle_ts, candle in candles.iterrows():
+                # Comprobar SL primero (consistente con create_labels)
+                if candle["low"] <= pos.sl_price:
+                    sell_reason = "SL"
+                    sell_price = pos.sl_price
+                    sell_ts = candle_ts
+                    result.stop_losses += 1
+                    break
+                if candle["high"] >= pos.tp_price:
+                    sell_reason = "TP"
+                    sell_price = pos.tp_price
+                    sell_ts = candle_ts
+                    result.take_profits += 1
+                    break
 
             if sell_reason:
-                sell_value = pos.quantity * current_price
+                pnl_pct = (sell_price - pos.entry_price) / pos.entry_price
+                sell_value = pos.quantity * sell_price
                 profit = sell_value - pos.invested
                 cash += sell_value
                 result.sells += 1
                 result.total_trades += 1
-                hold_h = (current_ts - pd.Timestamp(pos.entry_date)).total_seconds() / 3600
+                hold_h = (sell_ts - entry_ts).total_seconds() / 3600
                 hold_hours_list.append(hold_h)
                 trade_returns.append(pnl_pct)
                 if profit >= 0:
@@ -233,10 +249,10 @@ def run_backtest(
                 else:
                     result.losses += 1
                 result.trades_log.append({
-                    "date": str(current_ts),
+                    "date": str(sell_ts),
                     "action": f"SELL({sell_reason})",
                     "symbol": pos.symbol,
-                    "price": round(current_price, 6),
+                    "price": round(sell_price, 6),
                     "entry_price": round(pos.entry_price, 6),
                     "invested": round(pos.invested, 2),
                     "sell_value": round(sell_value, 2),
@@ -599,7 +615,7 @@ def main() -> None:
 
     if args.sweep:
         # Barrido de thresholds: entrena UNA vez, simula con cada threshold
-        sweep_thresholds = [0.08, 0.10, 0.12, 0.14, 0.16, 0.20, 0.30, 0.65]
+        sweep_thresholds = [0.10, 0.20, 0.40, 0.65]
         sweep_results: list[dict] = []
 
         # Primera iteracion: entrena el modelo
