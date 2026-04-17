@@ -602,7 +602,8 @@ class PricePredictor:
             )
 
         mean_auc = float(np.mean(auc_scores))
-        cv_cls1 = cv_report.get("1", {})
+        # Las labels son float (0.0/1.0), asi que la clave puede ser "1" o "1.0"
+        cv_cls1 = cv_report.get("1", cv_report.get("1.0", {}))
         metrics: dict[str, Any] = {
             "mean_auc": mean_auc,
             "cv_accuracy": cv_report.get("accuracy", 0),
