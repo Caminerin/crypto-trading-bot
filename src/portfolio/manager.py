@@ -116,61 +116,23 @@ class PortfolioManager:
             if asset not in stablecoins and asset not in _FIAT_ASSETS and qty > 0
         }
 
-        # Símbolos recomendados (ej. "BTCUSDT" -> "BTC")
-        recommended_assets = set()
-        for symbol, _ in recommendations:
-            asset = symbol.replace(quote, "")
-            recommended_assets.add(asset)
-
         # ------------------------------------------------------------------
-        # 1. VENTAS: posiciones que ya no están recomendadas
+        # COMPRAS: nuevas recomendaciones
         # ------------------------------------------------------------------
-        # Umbral mínimo para intentar vender (evita dust / posiciones residuales)
-        _MIN_SELL_VALUE_USDT = 1.0
-
-        for asset, qty in current_positions.items():
-            if asset not in recommended_assets:
-                symbol = f"{asset}{quote}"
-                # Filtrar dust: si conocemos el precio y el valor < umbral, ignorar
-                price = current_prices.get(symbol, 0)
-                if price > 0 and qty * price < _MIN_SELL_VALUE_USDT:
-                    logger.info(
-                        "Dust ignorado: %s vale $%.4f (< $%.0f)",
-                        asset,
-                        qty * price,
-                        _MIN_SELL_VALUE_USDT,
-                    )
-                    continue
-                actions.append(
-                    TradeAction(
-                        action="SELL",
-                        symbol=symbol,
-                        quote_qty=0,
-                        base_qty=qty,
-                        reason=f"{asset} ya no cumple criterios del modelo",
-                        probability=0.0,
-                    )
-                )
-
-        # ------------------------------------------------------------------
-        # 2. COMPRAS: nuevas recomendaciones
-        # ------------------------------------------------------------------
-        # Quote asset disponible tras ventas (estimación)
+        # Las ventas se gestionan externamente:
+        #   - OCO en Binance (TP / SL automáticos)
+        #   - Expiración de ventana temporal (target_horizon_hours)
         if strategy_quote_available is not None:
             usdt_available = strategy_quote_available
         else:
             usdt_available = current_portfolio.get(quote, 0.0)
-        for action in actions:
-            if action.action == "SELL" and action.symbol in current_prices:
-                usdt_available += action.base_qty * current_prices[action.symbol]
 
         # Reserva mínima de stablecoins
         min_reserve = total_value_usdt * self._pcfg.min_stablecoin_reserve
         usdt_for_trading = max(0, usdt_available - min_reserve)
 
-        # Contar posiciones que se mantienen (no vendidas)
-        kept_positions = {asset for asset in current_positions if asset in recommended_assets}
-        open_slots = self._pcfg.max_positions - len(kept_positions)
+        # Todas las posiciones abiertas cuentan como slots ocupados
+        open_slots = self._pcfg.max_positions - len(current_positions)
 
         if open_slots <= 0 or usdt_for_trading <= 0:
             logger.info(
@@ -206,7 +168,7 @@ class PortfolioManager:
                     symbol=symbol,
                     quote_qty=per_buy,
                     base_qty=0,
-                    reason=f"Modelo predice subida >2%% con prob={prob:.1%}",
+                    reason=f"Modelo predice subida con prob={prob:.1%}",
                     probability=prob,
                 )
             )
