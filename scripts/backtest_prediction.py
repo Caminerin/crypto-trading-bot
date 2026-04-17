@@ -577,7 +577,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--sweep", action="store_true",
-        help="Ejecutar barrido de thresholds (10%%-65%%)",
+        help="Ejecutar barrido de thresholds (solo 65%%)",
     )
     args = parser.parse_args()
 
@@ -629,17 +629,13 @@ def main() -> None:
     predictor = PricePredictor(config.model)
 
     if args.sweep:
-        # Barrido de thresholds: entrena UNA vez, simula con cada threshold
-        sweep_thresholds = [0.10, 0.20, 0.40, 0.65]
-        sweep_results: list[dict] = []
-
-        # Primera iteracion: entrena el modelo
-        first_thr = sweep_thresholds[0]
+        # Backtest con threshold unico (65%)
+        thr = 0.65
         result = run_backtest(
             klines_by_symbol=klines_by_symbol,
             predictor=predictor,
             budget=args.budget,
-            threshold=first_thr,
+            threshold=thr,
             tp_pct=args.tp,
             sl_pct=args.sl,
             max_positions=args.max_positions,
@@ -650,8 +646,8 @@ def main() -> None:
             / result.initial_budget * 100
             if result.initial_budget > 0 else 0
         )
-        sweep_results.append({
-            "threshold": first_thr,
+        sweep_results: list[dict] = [{
+            "threshold": thr,
             "trades": result.total_trades,
             "buys": result.buys,
             "sells": result.sells,
@@ -661,50 +657,13 @@ def main() -> None:
             "pnl_pct": pnl_pct,
             "max_dd": result.max_drawdown_pct,
             "recos": result.recommendations_made,
-        })
+        }]
         print(
-            f"  Threshold {first_thr:.0%}: "
+            f"  Threshold {thr:.0%}: "
             f"{result.total_trades} trades, "
             f"P&L={'+'if result.total_profit>=0 else ''}"
             f"${result.total_profit:.2f}"
         )
-
-        # Resto de thresholds: reusar modelo entrenado
-        for thr in sweep_thresholds[1:]:
-            result = run_backtest(
-                klines_by_symbol=klines_by_symbol,
-                predictor=predictor,
-                budget=args.budget,
-                threshold=thr,
-                tp_pct=args.tp,
-                sl_pct=args.sl,
-                max_positions=args.max_positions,
-                quote=quote,
-                skip_train=True,
-            )
-            pnl_pct = (
-                (result.final_value - result.initial_budget)
-                / result.initial_budget * 100
-                if result.initial_budget > 0 else 0
-            )
-            sweep_results.append({
-                "threshold": thr,
-                "trades": result.total_trades,
-                "buys": result.buys,
-                "sells": result.sells,
-                "wins": result.wins,
-                "losses": result.losses,
-                "pnl": result.total_profit,
-                "pnl_pct": pnl_pct,
-                "max_dd": result.max_drawdown_pct,
-                "recos": result.recommendations_made,
-            })
-            print(
-                f"  Threshold {thr:.0%}: "
-                f"{result.total_trades} trades, "
-                f"P&L={'+'if result.total_profit>=0 else ''}"
-                f"${result.total_profit:.2f}"
-            )
 
         print_sweep_table(sweep_results)
     else:

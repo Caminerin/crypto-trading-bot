@@ -34,6 +34,7 @@ from src.notifications.email_report import send_daily_report
 from src.portfolio.manager import PortfolioManager, TradeAction
 from src.strategies.dca import DCAAction, DCAStrategy
 from src.strategies.momentum import MomentumAction, MomentumStrategy
+from src.strategies.prediction_book import PredictionBook
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -211,8 +212,17 @@ def run_daily(config: AppConfig | None = None) -> None:
             len(klines),
         )
 
-    # Decidir acciones de prediccion (limitadas al budget de prediccion)
+    # Inicializar libro de posiciones de prediccion (inventario aislado)
+    pred_book = PredictionBook()
     prediction_budget = allocator.get_budget("prediction")
+    quote = config.portfolio.quote_asset
+
+    # USDT disponible para prediction = budget - lo ya invertido
+    pred_quote_available = max(0.0, prediction_budget - pred_book.invested_usdt)
+
+    # Construir cartera SOLO con posiciones de prediction (no la global)
+    pred_portfolio = pred_book.get_portfolio_dict(quote)
+
     current_prices: dict[str, float] = {}
     for sym, _ in recommendations:
         try:
@@ -220,24 +230,20 @@ def run_daily(config: AppConfig | None = None) -> None:
         except Exception:
             pass
 
-    # Obtener precios de posiciones actuales (para filtrar dust)
-    if not is_paper:
-        stablecoins = {"USDT", "USDC", "BUSD", "FDUSD", "DAI", "TUSD"}
-        quote = config.portfolio.quote_asset
-        for asset in portfolio_before:
-            if asset not in stablecoins:
-                symbol = f"{asset}{quote}"
-                if symbol not in current_prices:
-                    try:
-                        current_prices[symbol] = data_client.get_current_price(symbol)
-                    except Exception:
-                        pass
+    # Obtener precios de posiciones de prediction (para filtrar dust)
+    for symbol in pred_book.open_symbols:
+        if symbol not in current_prices:
+            try:
+                current_prices[symbol] = data_client.get_current_price(symbol)
+            except Exception:
+                pass
 
     actions = portfolio_mgr.decide_actions(
-        current_portfolio=portfolio_before,
+        current_portfolio=pred_portfolio,
         total_value_usdt=prediction_budget,
         recommendations=recommendations,
         current_prices=current_prices,
+        strategy_quote_available=pred_quote_available,
     )
     logger.info("Acciones prediccion: %d", len(actions))
     for a in actions:
@@ -251,6 +257,25 @@ def run_daily(config: AppConfig | None = None) -> None:
         successful,
         len(pred_results),
     )
+
+    # Registrar compras/ventas en el libro de prediction
+    for result in pred_results:
+        if not result.success:
+            continue
+        action = result.action
+        if action.action == "BUY" and result.executed_qty > 0:
+            pred_book.record_buy(
+                symbol=action.symbol,
+                price=result.executed_price,
+                quantity=result.executed_qty,
+                usdt_spent=action.quote_qty,
+            )
+        elif action.action == "SELL":
+            freed = pred_book.record_sell(action.symbol)
+            if result.executed_qty > 0:
+                sell_value = result.executed_qty * result.executed_price
+                profit = sell_value - freed
+                allocator.add_profit("prediction", profit)
 
     # ------------------------------------------------------------------
     # 7. ESTRATEGIA 2: DCA Inteligente (usa budget "dca")
