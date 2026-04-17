@@ -1,40 +1,52 @@
 # Crypto Trading Bot
 
-Bot de trading automático para Binance Spot que cada mañana analiza las 200 monedas con mayor volumen, predice cuáles subirán >2% en 24h, y optimiza tu cartera.
+Bot de trading automático para Binance Spot que cada 12 horas analiza las 75 monedas con mayor volumen, predice cuáles subirán >5% en 48h, y gestiona tu cartera con 3 estrategias.
 
 ## Cómo funciona
 
-1. **Datos**: Descarga velas de las top 200 monedas por volumen (pares USDT) de Binance.
-2. **Modelo**: Un modelo de Machine Learning (LightGBM) calcula la probabilidad de que cada moneda suba >2% en las próximas 24h.
-3. **Cartera**: Si alguna moneda supera el 70% de confianza, el bot ajusta tu cartera (vende lo que ya no cumple, compra lo nuevo).
-4. **Riesgo**: Cada compra lleva un stop-loss (3%) y take-profit (5%) automáticos.
-5. **Reporte**: Te envía un email con todo lo que hizo.
+1. **Datos**: Descarga velas de las top 75 monedas por volumen (pares USDC) de Binance.
+2. **Modelo**: Un ensemble de Machine Learning (LightGBM + XGBoost + RandomForest + ExtraTrees con meta-learner LogisticRegression) calcula la probabilidad de que cada moneda suba >5% en las próximas 48h.
+3. **Cartera**: Si alguna moneda supera el 65% de confianza, el bot compra y coloca una OCO (TP/SL automáticos).
+4. **Riesgo**: Cada compra lleva un stop-loss (5%) y take-profit (5%) automáticos vía orden OCO.
+5. **Expiración**: Si pasan 48h sin que salte TP ni SL, el bot vende a mercado.
+6. **Reporte**: Te envía un email con todo lo que hizo.
 
-## Reglas de la cartera
+## Estrategias
+
+| Estrategia | Descripción | Asignación |
+|---|---|---|
+| **Prediction (ML)** | Compra altcoins que el modelo predice que subirán >5% en 48h | 35% |
+| **DCA Inteligente** | Compra BTC/ETH/BNB en caídas fuertes | 20% |
+| **Momentum** | Compra BTC/ETH/BNB/SOL/XRP en tendencia alcista | 35% |
+| **Reserva** | Colchón intocable | 10% |
+
+## Reglas de la cartera (Prediction)
 
 | Parámetro | Valor |
 |---|---|
 | Máx. posiciones simultáneas | 5 |
 | Máx. % por moneda | 20% |
-| Reserva mínima en USDT | 10% |
 | Stop-loss | 5% |
-| Take-profit | 3% |
-| Tipo de orden | Market |
+| Take-profit | 5% |
+| Expiración | 48h |
+| Tipo de orden | Market + OCO |
 
 ## Requisitos
 
 - Python 3.11+
 - Cuenta de Binance con API keys (solo lectura + spot trading)
-- Cuenta de SendGrid (gratis) para emails
+- Cuenta de Mailjet para emails
 
 ## Instalación
 
 ```bash
 # Clonar el repo
-git clone https://github.com/TU_USUARIO/crypto-trading-bot.git
+git clone https://github.com/Caminerin/crypto-trading-bot.git
 cd crypto-trading-bot
 
-# Instalar dependencias
+# Crear entorno virtual e instalar dependencias
+python -m venv .venv
+source .venv/bin/activate
 pip install .
 
 # Copiar configuración
@@ -49,10 +61,13 @@ Edita el fichero `.env` con tus datos:
 ```
 BINANCE_API_KEY=tu_api_key
 BINANCE_API_SECRET=tu_api_secret
-SENDGRID_API_KEY=tu_sendgrid_key
-EMAIL_FROM=bot@tudominio.com
+MAILJET_API_KEY=tu_mailjet_key
+MAILJET_API_SECRET=tu_mailjet_secret
+EMAIL_FROM=tu@email.com
 EMAIL_TO=tu@email.com
+QUOTE_ASSET=USDC
 TRADING_MODE=paper
+CONFIDENCE_THRESHOLD=0.65
 ```
 
 > **IMPORTANTE**: Empieza siempre con `TRADING_MODE=paper` para probar sin dinero real.
@@ -67,49 +82,54 @@ python -m src.main
 python -m src.main train
 ```
 
-## Ejecución automática (GitHub Actions)
+## Ejecución automática (cron en servidor)
 
-El bot se ejecuta solo gracias a GitHub Actions:
+El bot se ejecuta vía cron en un VPS:
 
-- **Diario a las 07:00 UTC**: Analiza el mercado y opera.
-- **Domingos a las 06:00 UTC**: Re-entrena el modelo con datos nuevos.
+- **07:00 y 19:00 hora Madrid**: Analiza el mercado y opera.
+- **06:00 domingos hora Madrid**: Re-entrena el modelo con datos nuevos.
 
-### Configurar los secrets en GitHub
+### Ejemplo de crontab
 
-Ve a tu repositorio > Settings > Secrets and variables > Actions y añade:
+```
+# Bot trading (07:00 y 19:00 Madrid)
+0 5,17 * * * cd /root/crypto-trading-bot && source .venv/bin/activate && set -a && source .env && set +a && python -m src.main >> logs/cron.log 2>&1
 
-| Secret | Descripción |
-|---|---|
-| `BINANCE_API_KEY` | Tu API key de Binance |
-| `BINANCE_API_SECRET` | Tu API secret de Binance |
-| `SENDGRID_API_KEY` | Tu API key de SendGrid |
-| `EMAIL_FROM` | Email remitente (configurado en SendGrid) |
-| `EMAIL_TO` | Tu email personal (donde recibir reportes) |
-| `TRADING_MODE` | `paper` para simulación, `live` para real |
+# Re-entrenamiento semanal (domingos 06:00 Madrid)
+0 4 * * 0 cd /root/crypto-trading-bot && source .venv/bin/activate && set -a && source .env && set +a && python -m src.main train >> logs/retrain.log 2>&1
+```
 
 ## Estructura del proyecto
 
 ```
 crypto-trading-bot/
   src/
-    config.py           # Configuración central
-    main.py             # Orquestador principal
+    config.py              # Configuración central
+    main.py                # Orquestador principal
     data/
-      binance_client.py # Conexión a Binance API
-      features.py       # Cálculo de indicadores técnicos
+      binance_client.py    # Conexión a Binance API
+      features.py          # Cálculo de indicadores técnicos
     model/
-      predictor.py      # Modelo predictivo (LightGBM)
+      predictor.py         # Modelo predictivo (Stacking Ensemble)
     portfolio/
-      manager.py        # Gestión de cartera
+      manager.py           # Gestión de cartera
+    allocation/
+      allocator.py         # Reparto entre estrategias
     execution/
-      executor.py       # Ejecución de órdenes
+      executor.py          # Ejecución de órdenes
+    strategies/
+      prediction_book.py   # Inventario aislado de Prediction
+      dca.py               # Estrategia DCA Inteligente
+      momentum.py          # Estrategia Momentum
     notifications/
-      email_report.py   # Reportes por email
+      email_report.py      # Reportes por email (Mailjet)
     utils/
-      logger.py         # Logging
-  .github/workflows/
-    daily_trading.yml   # Cron diario
-    retrain_weekly.yml  # Re-entrenamiento semanal
+      logger.py            # Logging
+  scripts/
+    backtest_prediction.py # Backtest del modelo
+  data/                    # JSONs de posiciones y asignación
+  models/                  # Modelo entrenado (.joblib)
+  logs/                    # Logs de ejecución
   tests/
 ```
 
@@ -119,7 +139,7 @@ El bot arranca en modo simulación por defecto. En este modo:
 - NO ejecuta órdenes reales en Binance.
 - SÍ analiza el mercado y genera predicciones.
 - SÍ envía el reporte por email (para que veas qué haría).
-- Usa una cartera simulada de 1000 USDT.
+- Usa precios reales de Binance para simular ejecuciones realistas.
 
 Cuando estés satisfecho con los resultados, cambia `TRADING_MODE=live`.
 
