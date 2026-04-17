@@ -444,28 +444,56 @@ class BinanceTradingClient:
 
         Above = take-profit (LIMIT_MAKER): vende cuando sube.
         Below = stop-loss (STOP_LOSS_LIMIT): vende cuando baja.
+
+        Redondea precios a tickSize y cantidad a stepSize para cumplir
+        los filtros PRICE_FILTER y LOT_SIZE de Binance.
         """
-        take_profit_price = round(entry_price * (1 + self._risk_cfg.take_profit_pct), 8)
-        stop_price = round(entry_price * (1 - self._risk_cfg.stop_loss_pct), 8)
-        stop_limit_price = round(stop_price * 0.995, 8)
+        # Obtener filtros del símbolo para redondear correctamente
+        price_filter = self.get_price_filter(symbol)
+        lot_filter = self.get_lot_size_filter(symbol)
+
+        # Calcular precios
+        take_profit_price = entry_price * (1 + self._risk_cfg.take_profit_pct)
+        stop_price = entry_price * (1 - self._risk_cfg.stop_loss_pct)
+        stop_limit_price = stop_price * 0.995
+
+        # Redondear precios a tick_size
+        if price_filter:
+            tick_size = price_filter["tick_size"]
+            take_profit_price = self.round_to_tick_size(take_profit_price, tick_size)
+            stop_price = self.round_to_tick_size(stop_price, tick_size)
+            stop_limit_price = self.round_to_tick_size(stop_limit_price, tick_size)
+            tick_precision = max(0, int(round(-math.log10(tick_size)))) if tick_size > 0 else 8
+        else:
+            tick_precision = 8
+            logger.warning("No se encontró PRICE_FILTER para %s, usando 8 decimales", symbol)
+
+        # Redondear cantidad a step_size
+        if lot_filter:
+            step_size = lot_filter["step_size"]
+            quantity = self.round_to_step_size(quantity, step_size)
+            step_precision = max(0, int(round(-math.log10(step_size)))) if step_size > 0 else 8
+        else:
+            step_precision = 8
+            logger.warning("No se encontró LOT_SIZE para %s, usando 8 decimales", symbol)
 
         logger.info(
-            "OCO SELL %s qty=%.8f | TP=%.8f | SL=%.8f",
+            "OCO SELL %s qty=%s | TP=%s | SL=%s",
             symbol,
-            quantity,
-            take_profit_price,
-            stop_price,
+            f"{quantity:.{step_precision}f}",
+            f"{take_profit_price:.{tick_precision}f}",
+            f"{stop_price:.{tick_precision}f}",
         )
         try:
             order = self._client.create_oco_order(
                 symbol=symbol,
                 side="SELL",
-                quantity=f"{quantity:.8f}",
+                quantity=f"{quantity:.{step_precision}f}",
                 aboveType="LIMIT_MAKER",
-                abovePrice=f"{take_profit_price:.8f}",
+                abovePrice=f"{take_profit_price:.{tick_precision}f}",
                 belowType="STOP_LOSS_LIMIT",
-                belowPrice=f"{stop_limit_price:.8f}",
-                belowStopPrice=f"{stop_price:.8f}",
+                belowPrice=f"{stop_limit_price:.{tick_precision}f}",
+                belowStopPrice=f"{stop_price:.{tick_precision}f}",
                 belowTimeInForce="GTC",
             )
             return order
@@ -493,6 +521,31 @@ class BinanceTradingClient:
                     "step_size": float(f["stepSize"]),
                 }
         return None
+
+    def get_price_filter(self, symbol: str) -> dict[str, float] | None:
+        """Devuelve min_price, max_price y tick_size de un símbolo.
+
+        Retorna None si el símbolo no existe.
+        """
+        info = self.get_symbol_info(symbol)
+        if not info:
+            return None
+        for f in info.get("filters", []):
+            if f["filterType"] == "PRICE_FILTER":
+                return {
+                    "min_price": float(f["minPrice"]),
+                    "max_price": float(f["maxPrice"]),
+                    "tick_size": float(f["tickSize"]),
+                }
+        return None
+
+    def round_to_tick_size(self, price: float, tick_size: float) -> float:
+        """Redondea el precio al tick_size más cercano (hacia abajo)."""
+        if tick_size <= 0:
+            return price
+        precision = max(0, int(round(-math.log10(tick_size))))
+        rounded = math.floor(price / tick_size) * tick_size
+        return round(rounded, precision)
 
     def get_min_notional(self, symbol: str) -> float:
         """Devuelve el valor mínimo en USDT para una orden (MIN_NOTIONAL)."""
