@@ -136,6 +136,30 @@ class PredictionBook:
             portfolio[asset] = portfolio.get(asset, 0.0) + pos.quantity
         return portfolio
 
+    def get_expired_positions(self, horizon_hours: int) -> list[PredictionPosition]:
+        """Devuelve posiciones cuya ventana temporal ha expirado.
+
+        Una posición se considera expirada si han pasado más de
+        *horizon_hours* horas desde su ``entry_date``.
+        """
+        now = datetime.now(timezone.utc)
+        expired: list[PredictionPosition] = []
+        for pos in self._positions:
+            try:
+                entry = datetime.fromisoformat(pos.entry_date)
+                if entry.tzinfo is None:
+                    entry = entry.replace(tzinfo=timezone.utc)
+                elapsed_hours = (now - entry).total_seconds() / 3600
+                if elapsed_hours >= horizon_hours:
+                    expired.append(pos)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Fecha inválida en posición %s: %s",
+                    pos.symbol,
+                    pos.entry_date,
+                )
+        return expired
+
     # ------------------------------------------------------------------
     # Registro de operaciones
     # ------------------------------------------------------------------

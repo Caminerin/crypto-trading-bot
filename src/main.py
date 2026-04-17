@@ -28,7 +28,7 @@ from src.config import (
     load_config,
 )
 from src.data.binance_client import BinanceDataClient, BinanceTradingClient
-from src.execution.executor import OrderExecutor
+from src.execution.executor import ExecutionResult, OrderExecutor
 from src.model.predictor import PricePredictor
 from src.notifications.email_report import send_daily_report
 from src.portfolio.manager import PortfolioManager, TradeAction
@@ -217,10 +217,76 @@ def run_daily(config: AppConfig | None = None) -> None:
     prediction_budget = allocator.get_budget("prediction")
     quote = config.portfolio.quote_asset
 
-    # USDT disponible para prediction = budget - lo ya invertido
-    pred_quote_available = max(0.0, prediction_budget - pred_book.invested_usdt)
+    # ----------------------------------------------------------
+    # 6a. Vender posiciones expiradas (ventana temporal cumplida)
+    # ----------------------------------------------------------
+    # Las posiciones se cierran por 3 vías:
+    #   1. TP — OCO en Binance (automático)
+    #   2. SL — OCO en Binance (automático)
+    #   3. Expiración — si pasan target_horizon_hours sin que
+    #      salte ni TP ni SL, vendemos a mercado.
+    horizon = config.model.target_horizon_hours
+    expired = pred_book.get_expired_positions(horizon)
+    expired_results: list[ExecutionResult] = []
 
-    # Construir cartera SOLO con posiciones de prediction (no la global)
+    if expired:
+        logger.info(
+            "Posiciones expiradas (>%dh): %d",
+            horizon,
+            len(expired),
+        )
+    for pos in expired:
+        logger.info(
+            "  Cerrando %s (entrada %s, >%dh)",
+            pos.symbol,
+            pos.entry_date,
+            horizon,
+        )
+        if is_paper:
+            logger.info("[PAPER] Venta por expiración de %s", pos.symbol)
+            pred_book.record_sell(pos.symbol)
+            continue
+
+        assert trading_client is not None
+        # Verificar si la posición aún tiene saldo (la OCO pudo cerrarla)
+        try:
+            portfolio_now = trading_client.get_portfolio()
+            base_asset = pos.symbol.replace(quote, "")
+            real_balance = portfolio_now.get(base_asset, 0.0)
+        except Exception:
+            real_balance = pos.quantity
+
+        if real_balance <= 0:
+            logger.info(
+                "  %s ya sin balance (OCO ejecutada previamente)",
+                pos.symbol,
+            )
+            pred_book.record_sell(pos.symbol)
+            continue
+
+        # El executor ya cancela órdenes abiertas (OCO) antes de vender
+        sell_action = TradeAction(
+            action="SELL",
+            symbol=pos.symbol,
+            quote_qty=0,
+            base_qty=real_balance,
+            reason=f"Ventana de {horizon}h expirada",
+            probability=0.0,
+        )
+        result = executor.execute([sell_action])[0]
+        expired_results.append(result)
+
+        freed = pred_book.record_sell(pos.symbol)
+        if result.success and result.executed_qty > 0:
+            sell_value = result.executed_qty * result.executed_price
+            profit = sell_value - freed
+            allocator.add_profit("prediction", profit)
+
+    # ----------------------------------------------------------
+    # 6b. Compras nuevas (decide_actions ya solo genera compras)
+    # ----------------------------------------------------------
+    # Recalcular presupuesto tras posibles ventas por expiración
+    pred_quote_available = max(0.0, prediction_budget - pred_book.invested_usdt)
     pred_portfolio = pred_book.get_portfolio_dict(quote)
 
     current_prices: dict[str, float] = {}
@@ -230,7 +296,7 @@ def run_daily(config: AppConfig | None = None) -> None:
         except Exception:
             pass
 
-    # Obtener precios de posiciones de prediction (para filtrar dust)
+    # Obtener precios de posiciones abiertas
     for symbol in pred_book.open_symbols:
         if symbol not in current_prices:
             try:
@@ -245,20 +311,20 @@ def run_daily(config: AppConfig | None = None) -> None:
         current_prices=current_prices,
         strategy_quote_available=pred_quote_available,
     )
-    logger.info("Acciones prediccion: %d", len(actions))
+    logger.info("Acciones predicción: %d", len(actions))
     for a in actions:
         logger.info("  %s %s | %s", a.action, a.symbol, a.reason)
 
-    # Ejecutar ordenes de prediccion
+    # Ejecutar órdenes de predicción
     pred_results = executor.execute(actions)
     successful = sum(1 for r in pred_results if r.success)
     logger.info(
-        "Ordenes prediccion: %d/%d exitosas",
+        "Órdenes predicción: %d/%d exitosas",
         successful,
         len(pred_results),
     )
 
-    # Registrar compras/ventas en el libro de prediction
+    # Registrar compras en el libro de prediction
     for result in pred_results:
         if not result.success:
             continue
@@ -270,12 +336,6 @@ def run_daily(config: AppConfig | None = None) -> None:
                 quantity=result.executed_qty,
                 usdt_spent=action.quote_qty,
             )
-        elif action.action == "SELL":
-            freed = pred_book.record_sell(action.symbol)
-            if result.executed_qty > 0:
-                sell_value = result.executed_qty * result.executed_price
-                profit = sell_value - freed
-                allocator.add_profit("prediction", profit)
 
     # ------------------------------------------------------------------
     # 7. ESTRATEGIA 2: DCA Inteligente (usa budget "dca")
@@ -481,7 +541,7 @@ def run_daily(config: AppConfig | None = None) -> None:
         portfolio_after=portfolio_after,
         total_value_before=total_value_before,
         total_value_after=total_value_after,
-        results=pred_results,
+        results=expired_results + pred_results,
         predictions=predictions,
         is_paper=is_paper,
         dca_summary=dca_summary,
