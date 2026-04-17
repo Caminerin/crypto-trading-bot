@@ -153,7 +153,10 @@ def _add_volume_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["vol_change"] = df["volume"].pct_change()
 
     df["obv"] = ta.volume.on_balance_volume(df["close"], df["volume"])
-    df["vwap"] = (df["close"] * df["volume"]).cumsum() / df["volume"].cumsum()
+    # VWAP rolling 24h (evita sesgo acumulativo que depende del inicio de ventana)
+    cum_pv = (df["close"] * df["volume"]).rolling(window=24, min_periods=1).sum()
+    cum_vol = df["volume"].rolling(window=24, min_periods=1).sum()
+    df["vwap"] = np.where(cum_vol > 0, cum_pv / cum_vol, df["close"])
 
     return df
 

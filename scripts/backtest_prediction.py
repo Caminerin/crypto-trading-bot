@@ -76,6 +76,12 @@ def download_hourly_klines(symbol: str, days: int) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Costes de trading (realistas para Binance spot)
+# ---------------------------------------------------------------------------
+COMMISSION_RATE = 0.001   # 0.1% por operacion (taker fee)
+SLIPPAGE_RATE = 0.0005    # 0.05% slippage estimado
+
+# ---------------------------------------------------------------------------
 # Simulacion
 # ---------------------------------------------------------------------------
 
@@ -235,8 +241,12 @@ def run_backtest(
                     break
 
             if sell_reason:
-                pnl_pct = (sell_price - pos.entry_price) / pos.entry_price
-                sell_value = pos.quantity * sell_price
+                # Aplicar slippage al precio de venta (recibimos un poco menos)
+                eff_sell = sell_price * (1 - SLIPPAGE_RATE)
+                sell_value = pos.quantity * eff_sell
+                sell_commission = sell_value * COMMISSION_RATE
+                sell_value -= sell_commission
+                pnl_pct = (eff_sell - pos.entry_price) / pos.entry_price
                 profit = sell_value - pos.invested
                 cash += sell_value
                 result.sells += 1
@@ -295,13 +305,17 @@ def run_backtest(
                 continue
 
             current_price = pred_klines[symbol]["close"].iloc[-1]
-            quantity = buy_amount / current_price
-            tp_price = current_price * (1 + tp_pct)
-            sl_price = current_price * (1 - sl_pct)
+            # Aplicar slippage al precio de compra (pagamos un poco mas)
+            fill_price = current_price * (1 + SLIPPAGE_RATE)
+            commission = buy_amount * COMMISSION_RATE
+            net_invest = buy_amount - commission
+            quantity = net_invest / fill_price
+            tp_price = fill_price * (1 + tp_pct)
+            sl_price = fill_price * (1 - sl_pct)
 
             positions.append(BTPosition(
                 symbol=symbol,
-                entry_price=current_price,
+                entry_price=fill_price,
                 quantity=quantity,
                 invested=buy_amount,
                 entry_date=str(current_ts),
@@ -339,16 +353,17 @@ def run_backtest(
         if dd > max_dd:
             max_dd = dd
 
-    # Cerrar posiciones abiertas al precio final
+    # Cerrar posiciones abiertas al precio final (con costes)
     final_pos_value = 0.0
     for pos in positions:
         if pos.symbol in klines_by_symbol:
             last_price = klines_by_symbol[pos.symbol]["close"].iloc[-1]
         else:
             last_price = pos.entry_price
-        pv = pos.quantity * last_price
+        eff_close = last_price * (1 - SLIPPAGE_RATE)
+        pv = pos.quantity * eff_close * (1 - COMMISSION_RATE)
         final_pos_value += pv
-        pnl_pct = (last_price - pos.entry_price) / pos.entry_price
+        pnl_pct = (eff_close - pos.entry_price) / pos.entry_price
         result.open_positions.append({
             "symbol": pos.symbol,
             "entry_price": round(pos.entry_price, 6),
@@ -549,8 +564,8 @@ def main() -> None:
         help="Numero de monedas a analizar",
     )
     parser.add_argument(
-        "--tp", type=float, default=0.03,
-        help="Take-profit (default 3%%)",
+        "--tp", type=float, default=0.05,
+        help="Take-profit (default 5%%)",
     )
     parser.add_argument(
         "--sl", type=float, default=0.05,
