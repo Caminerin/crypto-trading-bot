@@ -564,8 +564,8 @@ def main() -> None:
         help="Numero de monedas a analizar",
     )
     parser.add_argument(
-        "--tp", type=float, default=0.03,
-        help="Take-profit (default 3%%)",
+        "--tp", type=float, default=0.05,
+        help="Take-profit (default 5%%)",
     )
     parser.add_argument(
         "--sl", type=float, default=0.05,
