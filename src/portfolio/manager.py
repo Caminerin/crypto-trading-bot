@@ -92,14 +92,18 @@ class PortfolioManager:
         total_value_usdt: float,
         recommendations: list[tuple[str, float]],
         current_prices: dict[str, float],
+        strategy_quote_available: float | None = None,
     ) -> list[TradeAction]:
         """Calcula la lista de acciones (compras y ventas) a ejecutar.
 
         Parámetros:
-        - current_portfolio: {asset: cantidad} (ej. {"BTC": 0.01, "USDT": 500})
-        - total_value_usdt: valor total de la cartera en USDT
-        - recommendations: [(symbol, probability)] ya filtradas y ordenadas
-        - current_prices: {symbol: price} para los pares USDT
+        - current_portfolio: {asset: cantidad} — solo posiciones de ESTA
+          estrategia (no la cartera global de Binance).
+        - total_value_usdt: budget total asignado a esta estrategia.
+        - recommendations: [(symbol, probability)] ya filtradas y ordenadas.
+        - current_prices: {symbol: price} para los pares USDT.
+        - strategy_quote_available: USDT disponible para esta estrategia.
+          Si es None, se lee del quote asset en current_portfolio (legacy).
         """
         actions: list[TradeAction] = []
         quote = self._pcfg.quote_asset
@@ -152,7 +156,10 @@ class PortfolioManager:
         # 2. COMPRAS: nuevas recomendaciones
         # ------------------------------------------------------------------
         # Quote asset disponible tras ventas (estimación)
-        usdt_available = current_portfolio.get(quote, 0.0)
+        if strategy_quote_available is not None:
+            usdt_available = strategy_quote_available
+        else:
+            usdt_available = current_portfolio.get(quote, 0.0)
         for action in actions:
             if action.action == "SELL" and action.symbol in current_prices:
                 usdt_available += action.base_qty * current_prices[action.symbol]
