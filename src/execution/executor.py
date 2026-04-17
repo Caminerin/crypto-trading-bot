@@ -168,9 +168,33 @@ class OrderExecutor:
 
             # Colocar OCO (stop-loss + take-profit) para compras
             if action.action == "BUY" and total_qty > 0:
+                # Leer balance real post-compra: Binance cobra comisión
+                # en el activo comprado, así que el saldo disponible es
+                # menor que total_qty de los fills.
+                oco_qty = total_qty
+                try:
+                    portfolio = self._client.get_portfolio()
+                    quote = self._config.portfolio.quote_asset
+                    base_asset = action.symbol.replace(quote, "")
+                    real_balance = portfolio.get(base_asset, 0.0)
+                    if 0 < real_balance < total_qty:
+                        oco_qty = real_balance
+                        logger.info(
+                            "OCO %s: usando balance real %.8f (fills %.8f, comisión %.8f)",
+                            action.symbol,
+                            real_balance,
+                            total_qty,
+                            total_qty - real_balance,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "No se pudo leer balance real post-compra de %s: %s",
+                        action.symbol,
+                        exc,
+                    )
                 self._client.place_oco_sell(
                     symbol=action.symbol,
-                    quantity=total_qty,
+                    quantity=oco_qty,
                     entry_price=avg_price,
                 )
 
