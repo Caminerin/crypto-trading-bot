@@ -68,6 +68,10 @@ def create_labels(
       toque ``stop_loss_pct`` (SL) -> label = 1.
     - Si el SL se toca primero, o no se toca nada -> label = 0.
 
+    Nota: cuando una misma vela toca AMBOS niveles, se asume SL primero
+    (enfoque conservador — dentro de una vela horaria no sabemos el
+    orden real).  Esto introduce un sesgo leve hacia labels negativos.
+
     Si *stop_loss_pct* es None, solo comprueba si el high toca TP
     en algun momento de la ventana.
 
@@ -151,33 +155,57 @@ def _optuna_objective(
 
 
 def _run_optuna(
-    X: pd.DataFrame, y: pd.Series, n_trials: int = OPTUNA_N_TRIALS,
+    X: pd.DataFrame,
+    y: pd.Series,
+    n_trials: int = OPTUNA_N_TRIALS,
+    timestamps: pd.DatetimeIndex | None = None,
 ) -> dict[str, Any]:
     """Ejecuta Optuna para encontrar los mejores hiperparametros.
 
-    Usa el ultimo fold de TimeSeriesSplit como validacion para mantener
-    el orden temporal.
+    Usa Purged TimeSeriesSplit con TODOS los folds (promedio de AUC)
+    para evitar sobreajuste al periodo mas reciente.
     """
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    tscv = TimeSeriesSplit(n_splits=3)
-    splits = list(tscv.split(X))
-    train_idx, val_idx = splits[-1]  # ultimo fold
+    splits = _purged_ts_split(
+        len(X), n_splits=3,
+        timestamps=timestamps, gap_hours=PURGE_GAP_HOURS,
+    )
 
-    X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-    y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+    def objective(trial: optuna.Trial) -> float:
+        params = {
+            "n_estimators": trial.suggest_int("n_estimators", 200, 600),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
+            "max_depth": trial.suggest_int("max_depth", 4, 10),
+            "num_leaves": trial.suggest_int("num_leaves", 15, 63),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "min_child_samples": trial.suggest_int("min_child_samples", 10, 50),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+        }
+        fold_aucs: list[float] = []
+        for train_idx, val_idx in splits:
+            model = lgb.LGBMClassifier(
+                **params, class_weight="balanced",
+                random_state=42, verbose=-1,
+            )
+            model.fit(
+                X.iloc[train_idx], y.iloc[train_idx],
+                eval_set=[(X.iloc[val_idx], y.iloc[val_idx])],
+                callbacks=[lgb.early_stopping(30, verbose=False)],
+            )
+            y_prob = model.predict_proba(X.iloc[val_idx])[:, 1]
+            fold_aucs.append(roc_auc_score(y.iloc[val_idx], y_prob))
+        return float(np.mean(fold_aucs))
 
     study = optuna.create_study(
         direction="maximize", sampler=optuna.samplers.TPESampler(seed=42),
     )
-    study.optimize(
-        lambda trial: _optuna_objective(trial, X_train, y_train, X_val, y_val),
-        n_trials=n_trials,
-        show_progress_bar=False,
-    )
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
     logger.info(
-        "Optuna completado: mejor AUC=%.4f en %d trials",
+        "Optuna completado: mejor AUC medio=%.4f en %d trials",
         study.best_value, n_trials,
     )
     logger.info("Mejores hiperparametros: %s", study.best_params)
@@ -193,19 +221,26 @@ def _select_features(
     y: pd.Series,
     feature_cols: list[str],
     lgbm_params: dict[str, Any],
+    train_idx: np.ndarray | None = None,
 ) -> list[str]:
     """Elimina features con importancia por debajo del percentil umbral.
 
     Entrena un LightGBM rapido con los hiperparametros de Optuna y
     mira que features aportan menos.  Devuelve la lista filtrada.
+
+    Si *train_idx* se proporciona, solo usa esas filas para entrenar
+    (evita data leakage usando datos de validacion para seleccionar).
     """
+    X_fit = X[feature_cols].iloc[train_idx] if train_idx is not None else X[feature_cols]
+    y_fit = y.iloc[train_idx] if train_idx is not None else y
+
     model = lgb.LGBMClassifier(
         **lgbm_params,
         class_weight="balanced",
         random_state=42,
         verbose=-1,
     )
-    model.fit(X[feature_cols], y)
+    model.fit(X_fit, y_fit)
 
     importances = model.feature_importances_
     threshold = np.percentile(importances, FEATURE_IMPORTANCE_THRESHOLD_PCTILE)
@@ -301,18 +336,31 @@ def _purged_ts_split(
     n_samples: int,
     n_splits: int = 3,
     gap: int = 0,
+    timestamps: pd.DatetimeIndex | None = None,
+    gap_hours: int = 0,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
     """TimeSeriesSplit con gap (purge) entre train y validation.
 
-    Elimina *gap* muestras entre el final de train y el inicio de
-    validation para evitar data leakage por el horizonte de labeling.
+    Si se proporcionan *timestamps* y *gap_hours* > 0, el purge se
+    calcula por tiempo real (eliminando filas de entrenamiento cuyo
+    timestamp este a menos de *gap_hours* horas del inicio de
+    validacion).  Esto es correcto cuando los datos intercalan
+    multiples monedas en el mismo instante.
+
+    Si no hay timestamps, usa *gap* filas como fallback.
     """
     tscv = TimeSeriesSplit(n_splits=n_splits)
     purged_splits: list[tuple[np.ndarray, np.ndarray]] = []
     for train_idx, val_idx in tscv.split(np.arange(n_samples)):
-        if gap > 0:
+        if timestamps is not None and gap_hours > 0:
+            val_start_time = timestamps[val_idx[0]]
+            purge_cutoff = val_start_time - pd.Timedelta(hours=gap_hours)
+            mask = timestamps[train_idx] <= purge_cutoff
+            train_idx = train_idx[mask]
+        elif gap > 0:
             train_idx = train_idx[:-gap] if len(train_idx) > gap else train_idx
-        purged_splits.append((train_idx, val_idx))
+        if len(train_idx) > 0:
+            purged_splits.append((train_idx, val_idx))
     return purged_splits
 
 
@@ -402,8 +450,13 @@ class PricePredictor:
         X = pd.concat(all_X)  # preservar indice temporal
         y = pd.concat(all_y)
         sort_order = X.index.argsort()
-        X = X.iloc[sort_order].reset_index(drop=True)
-        y = y.iloc[sort_order].reset_index(drop=True)
+        X = X.iloc[sort_order]
+        y = y.iloc[sort_order]
+
+        # Guardar timestamps ANTES de reset_index para purge basado en tiempo
+        timestamps = X.index.copy()
+        X = X.reset_index(drop=True)
+        y = y.reset_index(drop=True)
 
         logger.info(
             "Datos: %d muestras | positivas=%.1f%%",
@@ -428,14 +481,22 @@ class PricePredictor:
             "Paso 1/4: Optimizando hiperparametros con Optuna (%d trials)...",
             OPTUNA_N_TRIALS,
         )
-        best_params = _run_optuna(X, y)
+        best_params = _run_optuna(X, y, timestamps=timestamps)
 
         # ----------------------------------------------------------
         # Paso 2: Feature selection
         # ----------------------------------------------------------
+        # Usar solo datos del primer ~70% (train del ultimo fold) para
+        # seleccionar features, evitando data leakage.
         logger.info("Paso 2/4: Seleccionando features...")
+        fs_splits = _purged_ts_split(
+            len(X), n_splits=3,
+            timestamps=timestamps, gap_hours=PURGE_GAP_HOURS,
+        )
+        fs_train_idx = fs_splits[-1][0] if fs_splits else None
         self._selected_features = _select_features(
             X, y, self._feature_cols, best_params,
+            train_idx=fs_train_idx,
         )
         X_sel = X[self._selected_features]
 
@@ -444,11 +505,13 @@ class PricePredictor:
         # ----------------------------------------------------------
         logger.info("Paso 3/4: Evaluando con Purged TimeSeriesSplit...")
 
-        # El gap es solo el horizonte de labeling (48h). Los datos ya estan
-        # ordenados por timestamp, asi que 48 filas ~= 48h de distintas monedas
-        # entrelazadas en el mismo instante.  No multiplicar por n_coins.
-        purge_gap = PURGE_GAP_HOURS
-        splits = _purged_ts_split(len(X_sel), n_splits=3, gap=purge_gap)
+        # Purge basado en timestamps reales: elimina filas de train cuyo
+        # timestamp este a menos de 48h del inicio de validacion.
+        # Esto es correcto con multiples monedas intercaladas.
+        splits = _purged_ts_split(
+            len(X_sel), n_splits=3,
+            timestamps=timestamps, gap_hours=PURGE_GAP_HOURS,
+        )
 
         auc_scores: list[float] = []
         per_model_auc: dict[str, list[float]] = {
