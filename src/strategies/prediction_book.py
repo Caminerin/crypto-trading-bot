@@ -136,6 +136,53 @@ class PredictionBook:
             portfolio[asset] = portfolio.get(asset, 0.0) + pos.quantity
         return portfolio
 
+    def reconcile(
+        self,
+        portfolio: dict[str, float],
+        open_orders_by_symbol: dict[str, list],
+        quote_asset: str,
+    ) -> list[PredictionPosition]:
+        """Reconcilia el libro con el estado real de Binance.
+
+        Compara cada posición registrada con los balances reales y las
+        órdenes abiertas.  Si una posición no tiene balance NI órdenes
+        abiertas, significa que la OCO (TP/SL) ya se ejecutó entre
+        ejecuciones del bot → se elimina del libro.
+
+        Devuelve la lista de posiciones eliminadas (para logging).
+        """
+        closed: list[PredictionPosition] = []
+        remaining: list[PredictionPosition] = []
+
+        for pos in self._positions:
+            base_asset = pos.symbol.replace(quote_asset, "")
+            balance = portfolio.get(base_asset, 0.0)
+            has_orders = len(open_orders_by_symbol.get(pos.symbol, [])) > 0
+
+            if balance <= 0 and not has_orders:
+                logger.info(
+                    "Reconciliación: %s cerrada por OCO (sin balance ni órdenes). "
+                    "Liberando $%.2f del book.",
+                    pos.symbol,
+                    pos.invested_usdt,
+                )
+                closed.append(pos)
+            else:
+                remaining.append(pos)
+
+        if closed:
+            self._positions = remaining
+            self.save_positions()
+            logger.info(
+                "Reconciliación: %d posiciones eliminadas, %d vigentes",
+                len(closed),
+                len(remaining),
+            )
+        else:
+            logger.info("Reconciliación: todas las posiciones coinciden con Binance")
+
+        return closed
+
     def get_expired_positions(self, horizon_hours: int) -> list[PredictionPosition]:
         """Devuelve posiciones cuya ventana temporal ha expirado.
 

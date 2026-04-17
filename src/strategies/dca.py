@@ -146,6 +146,49 @@ class DCAStrategy:
     def positions(self) -> list[DCAPosition]:
         return list(self._positions)
 
+    def reconcile(
+        self,
+        portfolio: dict[str, float],
+        quote_asset: str,
+    ) -> list[DCAPosition]:
+        """Reconcilia posiciones DCA con el estado real de Binance.
+
+        Si una posición no tiene balance en Binance, significa que se
+        vendió manualmente o por otro mecanismo → se elimina del libro.
+
+        Devuelve la lista de posiciones eliminadas.
+        """
+        closed: list[DCAPosition] = []
+        remaining: list[DCAPosition] = []
+
+        for pos in self._positions:
+            base_asset = pos.symbol.replace(quote_asset, "")
+            balance = portfolio.get(base_asset, 0.0)
+
+            if balance <= 0:
+                logger.info(
+                    "DCA reconciliación: %s sin balance → eliminada "
+                    "(invertido=$%.2f)",
+                    pos.symbol,
+                    pos.invested_usdt,
+                )
+                closed.append(pos)
+            else:
+                remaining.append(pos)
+
+        if closed:
+            self._positions = remaining
+            self.save_positions()
+            logger.info(
+                "DCA reconciliación: %d eliminadas, %d vigentes",
+                len(closed),
+                len(remaining),
+            )
+        else:
+            logger.info("DCA reconciliación: todas las posiciones coinciden")
+
+        return closed
+
     # ------------------------------------------------------------------
     # Logica principal
     # ------------------------------------------------------------------

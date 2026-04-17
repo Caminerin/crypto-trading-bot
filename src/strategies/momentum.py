@@ -150,6 +150,51 @@ class MomentumStrategy:
     def positions(self) -> list[MomentumPosition]:
         return list(self._positions)
 
+    def reconcile(
+        self,
+        portfolio: dict[str, float],
+        quote_asset: str,
+    ) -> list[MomentumPosition]:
+        """Reconcilia posiciones Momentum con el estado real de Binance.
+
+        Si una posición no tiene balance en Binance, significa que se
+        vendió manualmente o por otro mecanismo → se elimina del libro.
+
+        Devuelve la lista de posiciones eliminadas.
+        """
+        closed: list[MomentumPosition] = []
+        remaining: list[MomentumPosition] = []
+
+        for pos in self._positions:
+            base_asset = pos.symbol.replace(quote_asset, "")
+            balance = portfolio.get(base_asset, 0.0)
+
+            if balance <= 0:
+                logger.info(
+                    "Momentum reconciliación: %s sin balance → eliminada "
+                    "(invertido=$%.2f)",
+                    pos.symbol,
+                    pos.invested_usdt,
+                )
+                closed.append(pos)
+            else:
+                remaining.append(pos)
+
+        if closed:
+            self._positions = remaining
+            self.save_positions()
+            logger.info(
+                "Momentum reconciliación: %d eliminadas, %d vigentes",
+                len(closed),
+                len(remaining),
+            )
+        else:
+            logger.info(
+                "Momentum reconciliación: todas las posiciones coinciden",
+            )
+
+        return closed
+
     # ------------------------------------------------------------------
     # Lógica principal
     # ------------------------------------------------------------------

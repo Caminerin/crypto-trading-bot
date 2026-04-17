@@ -68,7 +68,7 @@ def run_daily(config: AppConfig | None = None) -> None:
             )
             is_paper = True
 
-    executor = OrderExecutor(config, trading_client)
+    executor = OrderExecutor(config, trading_client, data_client)
     portfolio_mgr = PortfolioManager(config.portfolio, config.risk)
     predictor = PricePredictor(config.model)
 
@@ -218,6 +218,26 @@ def run_daily(config: AppConfig | None = None) -> None:
     quote = config.portfolio.quote_asset
 
     # ----------------------------------------------------------
+    # 6a-pre. Reconciliar PredictionBook con Binance
+    # ----------------------------------------------------------
+    # Si una OCO (TP/SL) se ejecutó entre ejecuciones del bot,
+    # el JSON queda desincronizado.  Reconciliamos leyendo balances
+    # reales y órdenes abiertas.
+    if not is_paper and trading_client is not None and pred_book.positions:
+        try:
+            real_portfolio = trading_client.get_portfolio()
+            orders_by_symbol: dict[str, list] = {}
+            for pos in pred_book.positions:
+                orders_by_symbol[pos.symbol] = trading_client.get_open_orders(
+                    pos.symbol,
+                )
+            pred_book.reconcile(
+                real_portfolio, orders_by_symbol, quote,
+            )
+        except Exception as exc:
+            logger.warning("Error en reconciliación de PredictionBook: %s", exc)
+
+    # ----------------------------------------------------------
     # 6a. Vender posiciones expiradas (ventana temporal cumplida)
     # ----------------------------------------------------------
     # Las posiciones se cierran por 3 vías:
@@ -358,6 +378,14 @@ def run_daily(config: AppConfig | None = None) -> None:
             asset_policies=DEFAULT_ASSET_POLICIES,
         )
 
+        # Reconciliar DCA con Binance
+        if not is_paper and trading_client is not None and dca_strategy.positions:
+            try:
+                dca_portfolio = trading_client.get_portfolio()
+                dca_strategy.reconcile(dca_portfolio, quote)
+            except Exception as exc:
+                logger.warning("Error en reconciliación DCA: %s", exc)
+
         # Obtener cambios de precio 24h y precios actuales para activos DCA
         price_changes_24h: dict[str, float] = {}
         dca_prices: dict[str, float] = {}
@@ -429,6 +457,14 @@ def run_daily(config: AppConfig | None = None) -> None:
             assets=list(config.momentum.assets),
             asset_policies=DEFAULT_MOMENTUM_POLICIES,
         )
+
+        # Reconciliar Momentum con Binance
+        if not is_paper and trading_client is not None and momentum_strategy.positions:
+            try:
+                mom_portfolio = trading_client.get_portfolio()
+                momentum_strategy.reconcile(mom_portfolio, quote)
+            except Exception as exc:
+                logger.warning("Error en reconciliación Momentum: %s", exc)
 
         # Obtener datos para momentum
         momentum_prices: dict[str, float] = {}

@@ -657,6 +657,14 @@ class BinanceTradingClient:
             "via": "convert",
         }
 
+    def get_open_orders(self, symbol: str) -> list[dict[str, Any]]:
+        """Devuelve las órdenes abiertas de un símbolo."""
+        try:
+            return self._client.get_open_orders(symbol=symbol)
+        except BinanceAPIException as exc:
+            logger.warning("Error leyendo órdenes abiertas de %s: %s", symbol, exc)
+            return []
+
     def cancel_open_orders(self, symbol: str) -> list[dict[str, Any]]:
         """Cancela todas las órdenes abiertas de un símbolo."""
         try:

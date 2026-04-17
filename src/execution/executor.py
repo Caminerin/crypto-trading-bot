@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from binance.exceptions import BinanceAPIException
 
 from src.config import AppConfig
-from src.data.binance_client import BinanceTradingClient
+from src.data.binance_client import BinanceDataClient, BinanceTradingClient
 from src.portfolio.manager import TradeAction
 from src.utils.logger import get_logger
 
@@ -36,9 +36,15 @@ class ExecutionResult:
 class OrderExecutor:
     """Ejecuta órdenes en modo live o paper trading."""
 
-    def __init__(self, config: AppConfig, trading_client: BinanceTradingClient | None) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        trading_client: BinanceTradingClient | None,
+        data_client: BinanceDataClient | None = None,
+    ) -> None:
         self._config = config
         self._client = trading_client
+        self._data_client = data_client
 
     def execute(self, actions: list[TradeAction]) -> list[ExecutionResult]:
         """Ejecuta una lista de acciones y devuelve los resultados."""
@@ -58,20 +64,45 @@ class OrderExecutor:
         return results
 
     def _execute_paper(self, action: TradeAction) -> ExecutionResult:
-        """Simula la ejecución sin tocar Binance."""
+        """Simula la ejecución sin tocar Binance.
+
+        Intenta obtener el precio real del activo para que las
+        cantidades simuladas sean realistas (qty base = quote / precio).
+        """
+        # Obtener precio real para simulación realista
+        sim_price = 0.0
+        if self._data_client is not None:
+            try:
+                sim_price = self._data_client.get_current_price(action.symbol)
+            except Exception:
+                pass
+
+        if action.action == "BUY":
+            if sim_price > 0:
+                executed_qty = action.quote_qty / sim_price
+                executed_price = sim_price
+            else:
+                executed_qty = action.quote_qty
+                executed_price = 0.0
+        else:
+            executed_qty = action.base_qty
+            executed_price = sim_price
+
         logger.info(
-            "[PAPER] %s %s | qty_quote=%.2f | qty_base=%.8f | reason=%s",
+            "[PAPER] %s %s | qty_quote=%.2f | qty_base=%.8f | "
+            "precio=%.8f | reason=%s",
             action.action,
             action.symbol,
             action.quote_qty,
-            action.base_qty,
+            executed_qty,
+            executed_price,
             action.reason,
         )
         return ExecutionResult(
             action=action,
             success=True,
-            executed_qty=action.base_qty if action.action == "SELL" else action.quote_qty,
-            executed_price=0.0,
+            executed_qty=executed_qty,
+            executed_price=executed_price,
             commission=0.0,
             error="",
         )
