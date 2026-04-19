@@ -362,6 +362,7 @@ def run_daily(config: AppConfig | None = None) -> None:
     # ------------------------------------------------------------------
     dca_summary: dict = {}
     dca_actions_today: list[DCAAction] = []
+    dca_results_today: list[ExecutionResult] = []
 
     if config.dca.enabled:
         logger.info("=" * 40)
@@ -423,12 +424,14 @@ def run_daily(config: AppConfig | None = None) -> None:
                 elif dca_action.action == "SELL":
                     dca_strategy.record_sell(dca_action.symbol)
             else:
-                _execute_dca_live(
-                    dca_action,
-                    executor,
-                    dca_strategy,
-                    allocator,
-                    dca_prices,
+                dca_results_today.extend(
+                    _execute_dca_live(
+                        dca_action,
+                        executor,
+                        dca_strategy,
+                        allocator,
+                        dca_prices,
+                    )
                 )
 
         # Resumen DCA para el email
@@ -441,6 +444,8 @@ def run_daily(config: AppConfig | None = None) -> None:
     # 8. ESTRATEGIA 3: Momentum (usa budget "momentum")
     # ------------------------------------------------------------------
     momentum_summary: dict = {}
+    momentum_actions_today: list[MomentumAction] = []
+    momentum_results_today: list[ExecutionResult] = []
 
     if config.momentum.enabled:
         logger.info("=" * 40)
@@ -493,6 +498,7 @@ def run_daily(config: AppConfig | None = None) -> None:
             momentum_prices,
             daily_closes,
         )
+        momentum_actions_today = list(momentum_actions)
         logger.info("Acciones Momentum: %d", len(momentum_actions))
 
         # Ejecutar acciones Momentum
@@ -518,12 +524,14 @@ def run_daily(config: AppConfig | None = None) -> None:
                 elif m_action.action == "SELL":
                     momentum_strategy.record_sell(m_action.symbol)
             else:
-                _execute_momentum_live(
-                    m_action,
-                    executor,
-                    momentum_strategy,
-                    allocator,
-                    momentum_prices,
+                momentum_results_today.extend(
+                    _execute_momentum_live(
+                        m_action,
+                        executor,
+                        momentum_strategy,
+                        allocator,
+                        momentum_prices,
+                    )
                 )
 
         # Resumen Momentum para el email
@@ -571,6 +579,8 @@ def run_daily(config: AppConfig | None = None) -> None:
     # ------------------------------------------------------------------
     # 9. Enviar reporte
     # ------------------------------------------------------------------
+    prediction_summary = pred_book.get_summary(current_prices)
+
     email_sent = send_daily_report(
         config=config.email,
         portfolio_before=portfolio_before,
@@ -584,6 +594,10 @@ def run_daily(config: AppConfig | None = None) -> None:
         allocation_budgets=allocator.get_all_budgets(),
         dca_actions=dca_actions_today,
         momentum_summary=momentum_summary,
+        prediction_summary=prediction_summary,
+        dca_results=dca_results_today,
+        momentum_results=momentum_results_today,
+        momentum_actions=momentum_actions_today,
     )
     if email_sent:
         logger.info("Reporte enviado por email")
@@ -667,8 +681,8 @@ def _execute_momentum_live(
     momentum_strategy: MomentumStrategy,
     allocator: PortfolioAllocator,
     momentum_prices: dict[str, float],
-) -> None:
-    """Ejecuta una accion Momentum en modo live."""
+) -> list[ExecutionResult]:
+    """Ejecuta una acción Momentum en modo live. Devuelve los resultados."""
     trade = TradeAction(
         action=m_action.action,
         symbol=m_action.symbol,
@@ -702,6 +716,7 @@ def _execute_momentum_live(
             m_action.symbol,
             error,
         )
+    return results
 
 
 def _execute_dca_live(
@@ -710,9 +725,8 @@ def _execute_dca_live(
     dca_strategy: DCAStrategy,
     allocator: PortfolioAllocator,
     dca_prices: dict[str, float],
-) -> None:
-    """Ejecuta una accion DCA en modo live."""
-    # Convertir DCAAction en TradeAction para reutilizar el executor
+) -> list[ExecutionResult]:
+    """Ejecuta una acción DCA en modo live. Devuelve los resultados."""
     trade = TradeAction(
         action=dca_action.action,
         symbol=dca_action.symbol,
@@ -747,6 +761,7 @@ def _execute_dca_live(
             dca_action.symbol,
             error,
         )
+    return results
 
 
 def run_train_only(config: AppConfig | None = None) -> None:
