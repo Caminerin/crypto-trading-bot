@@ -114,6 +114,16 @@ def run_daily(config: AppConfig | None = None) -> None:
     if not allocator.is_initialized:
         allocator.initialize(total_value_before)
 
+    # Siempre rebalancear al inicio con el balance real de Binance.
+    # Esto corrige desviaciones causadas por OCOs ejecutadas entre
+    # ejecuciones, depósitos, retiradas, etc.
+    if not is_paper:
+        allocator.rebalance(total_value_before)
+        logger.info(
+            "Allocator rebalanceado con balance real $%.2f",
+            total_value_before,
+        )
+
     budgets = allocator.get_all_budgets()
     logger.info(
         "Asignacion: prediccion=$%.2f | dca=$%.2f | momentum=$%.2f | reserva=$%.2f",
@@ -222,20 +232,35 @@ def run_daily(config: AppConfig | None = None) -> None:
     # ----------------------------------------------------------
     # Si una OCO (TP/SL) se ejecutó entre ejecuciones del bot,
     # el JSON queda desincronizado.  Reconciliamos leyendo balances
-    # reales y órdenes abiertas.
+    # reales (free + locked) y órdenes abiertas.
     if not is_paper and trading_client is not None and pred_book.positions:
+        logger.info(
+            "Reconciliando PredictionBook (%d posiciones)...",
+            len(pred_book.positions),
+        )
         try:
-            real_portfolio = trading_client.get_portfolio()
+            real_portfolio = trading_client.get_portfolio(
+                include_locked=True,
+            )
             orders_by_symbol: dict[str, list] = {}
             for pos in pred_book.positions:
-                orders_by_symbol[pos.symbol] = trading_client.get_open_orders(
-                    pos.symbol,
+                orders_by_symbol[pos.symbol] = (
+                    trading_client.get_open_orders(pos.symbol)
                 )
-            pred_book.reconcile(
+            closed = pred_book.reconcile(
                 real_portfolio, orders_by_symbol, quote,
             )
+            if closed:
+                logger.info(
+                    "Reconciliación: %d posiciones cerradas por OCO",
+                    len(closed),
+                )
+                # Recalcular budget tras reconciliación
+                prediction_budget = allocator.get_budget("prediction")
         except Exception as exc:
-            logger.warning("Error en reconciliación de PredictionBook: %s", exc)
+            logger.warning(
+                "Error en reconciliación de PredictionBook: %s", exc,
+            )
 
     # ----------------------------------------------------------
     # 6a. Vender posiciones expiradas (ventana temporal cumplida)
@@ -546,27 +571,14 @@ def run_daily(config: AppConfig | None = None) -> None:
 
     logger.info("Balance final: $%.2f", total_value_after)
 
-    # Actualizar budgets del allocator con el valor real
-    if not is_paper and total_value_after != total_value_before:
-        pnl = total_value_after - total_value_before
-        active_pct = (
-            config.allocation.prediction_pct
-            + config.allocation.dca_pct
-            + config.allocation.momentum_pct
+    # Rebalancear con el valor final real para que los budgets
+    # reflejen el capital actual de cara a la próxima ejecución.
+    if not is_paper:
+        allocator.rebalance(total_value_after)
+        logger.info(
+            "Allocator rebalanceado con balance final $%.2f",
+            total_value_after,
         )
-        if active_pct > 0:
-            allocator.add_profit(
-                "prediction",
-                pnl * config.allocation.prediction_pct / active_pct,
-            )
-            allocator.add_profit(
-                "dca",
-                pnl * config.allocation.dca_pct / active_pct,
-            )
-            allocator.add_profit(
-                "momentum",
-                pnl * config.allocation.momentum_pct / active_pct,
-            )
 
     # ------------------------------------------------------------------
     # 9. Enviar reporte
