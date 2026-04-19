@@ -292,14 +292,24 @@ class BinanceTradingClient:
     # Cartera
     # ------------------------------------------------------------------
 
-    def get_portfolio(self) -> dict[str, float]:
-        """Devuelve {asset: free_balance} para activos con saldo > 0."""
+    def get_portfolio(
+        self, include_locked: bool = False,
+    ) -> dict[str, float]:
+        """Devuelve {asset: balance} para activos con saldo > 0.
+
+        Si *include_locked* es True devuelve free + locked (total real
+        incluyendo monedas bloqueadas en órdenes OCO).  Por defecto
+        devuelve solo *free* para mantener compatibilidad con el
+        executor que necesita saber cuánto puede vender.
+        """
         account = self._client.get_account()
         balances: dict[str, float] = {}
         for b in account["balances"]:
             free = float(b["free"])
-            if free > 0:
-                balances[b["asset"]] = free
+            locked = float(b.get("locked", 0))
+            total = (free + locked) if include_locked else free
+            if total > 0:
+                balances[b["asset"]] = total
         return balances
 
     # Activos fiat que no tienen par USDT en Binance
@@ -360,8 +370,12 @@ class BinanceTradingClient:
     }
 
     def get_portfolio_value_usdt(self) -> float:
-        """Valor total de la cartera en USD (usando USDT o USDC como referencia)."""
-        portfolio = self.get_portfolio()
+        """Valor total de la cartera en USD (usando USDT o USDC como referencia).
+
+        Incluye balances bloqueados en órdenes (OCO, limit, etc.)
+        para que la valoración refleje el capital real.
+        """
+        portfolio = self.get_portfolio(include_locked=True)
         quote = self._portfolio_cfg.quote_asset
         total = 0.0
         for asset, qty in portfolio.items():
