@@ -13,6 +13,7 @@ Este es el punto de entrada.  Coordina todos los módulos:
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -301,10 +302,14 @@ def run_daily(config: AppConfig | None = None) -> None:
         except Exception:
             real_balance = pos.quantity
 
-        if real_balance <= 0:
+        balance_value = real_balance * pos.entry_price
+        if real_balance <= 0 or balance_value < 1.0:
             logger.info(
-                "  %s ya sin balance (OCO ejecutada previamente)",
+                "  %s ya sin balance real (OCO ejecutada, "
+                "residuo=%.8f ~$%.4f)",
                 pos.symbol,
+                real_balance,
+                balance_value,
             )
             pred_book.record_sell(pos.symbol)
             continue
@@ -583,6 +588,8 @@ def run_daily(config: AppConfig | None = None) -> None:
     # ------------------------------------------------------------------
     # 9. Enviar reporte
     # ------------------------------------------------------------------
+    model_info = _get_model_info(config)
+
     email_sent = send_daily_report(
         config=config.email,
         portfolio_before=portfolio_before,
@@ -596,6 +603,7 @@ def run_daily(config: AppConfig | None = None) -> None:
         allocation_budgets=allocator.get_all_budgets(),
         dca_actions=dca_actions_today,
         momentum_summary=momentum_summary,
+        model_info=model_info,
     )
     if email_sent:
         logger.info("Reporte enviado por email")
@@ -812,12 +820,33 @@ def run_train_only(config: AppConfig | None = None) -> None:
     )
 
 
+def _get_model_info(config: AppConfig) -> dict[str, object]:
+    """Obtiene informacion sobre el modelo para el reporte."""
+    info: dict[str, object] = {
+        "retrain_interval_days": config.model.retrain_interval_days,
+    }
+    if not MODEL_FILE.exists():
+        info["trained_at"] = "No existe"
+        info["age_days"] = -1
+        info["status"] = "missing"
+        return info
+
+    mtime = datetime.fromtimestamp(
+        os.path.getmtime(MODEL_FILE), tz=timezone.utc,
+    )
+    age_days = (datetime.now(timezone.utc) - mtime).days
+    info["trained_at"] = mtime.strftime("%Y-%m-%d %H:%M UTC")
+    info["age_days"] = age_days
+    info["status"] = (
+        "ok" if age_days < config.model.retrain_interval_days else "stale"
+    )
+    return info
+
+
 def _should_retrain(config: AppConfig) -> bool:
     """Decide si hay que re-entrenar el modelo."""
     if not MODEL_FILE.exists():
         return True
-
-    import os
 
     mtime = datetime.fromtimestamp(os.path.getmtime(MODEL_FILE), tz=timezone.utc)
     age_days = (datetime.now(timezone.utc) - mtime).days

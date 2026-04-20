@@ -136,6 +136,11 @@ class PredictionBook:
             portfolio[asset] = portfolio.get(asset, 0.0) + pos.quantity
         return portfolio
 
+    # Umbral en USD por debajo del cual un balance residual se
+    # considera "polvo" (dust) y no una posición real.  Esto ocurre
+    # cuando la OCO vende pero queda un resto por redondeo de stepSize.
+    _DUST_THRESHOLD_USD = 1.0
+
     def reconcile(
         self,
         portfolio: dict[str, float],
@@ -145,9 +150,9 @@ class PredictionBook:
         """Reconcilia el libro con el estado real de Binance.
 
         Compara cada posición registrada con los balances reales y las
-        órdenes abiertas.  Si una posición no tiene balance NI órdenes
-        abiertas, significa que la OCO (TP/SL) ya se ejecutó entre
-        ejecuciones del bot → se elimina del libro.
+        órdenes abiertas.  Si una posición no tiene balance (o solo
+        queda polvo residual < $1) NI órdenes abiertas, significa que
+        la OCO (TP/SL) ya se ejecutó → se elimina del libro.
 
         Devuelve la lista de posiciones eliminadas (para logging).
         """
@@ -159,11 +164,22 @@ class PredictionBook:
             balance = portfolio.get(base_asset, 0.0)
             has_orders = len(open_orders_by_symbol.get(pos.symbol, [])) > 0
 
-            if balance <= 0 and not has_orders:
+            balance_value = balance * pos.entry_price if balance > 0 else 0.0
+            is_dust = balance_value < self._DUST_THRESHOLD_USD
+
+            if (balance <= 0 or is_dust) and not has_orders:
+                reason = (
+                    "polvo residual"
+                    if balance > 0
+                    else "sin balance ni órdenes"
+                )
                 logger.info(
-                    "Reconciliación: %s cerrada por OCO (sin balance ni órdenes). "
-                    "Liberando $%.2f del book.",
+                    "Reconciliación: %s cerrada por OCO (%s, "
+                    "balance=%.8f ~$%.4f). Liberando $%.2f del book.",
                     pos.symbol,
+                    reason,
+                    balance,
+                    balance_value,
                     pos.invested_usdt,
                 )
                 closed.append(pos)

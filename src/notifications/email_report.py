@@ -35,6 +35,7 @@ def send_daily_report(
     allocation_budgets: dict[str, float] | None = None,
     dca_actions: list[DCAAction] | None = None,
     momentum_summary: dict[str, object] | None = None,
+    model_info: dict[str, object] | None = None,
 ) -> bool:
     """Envia el reporte diario por email.
 
@@ -63,6 +64,7 @@ def send_daily_report(
         allocation_budgets=allocation_budgets or {},
         dca_actions=dca_actions or [],
         momentum_summary=momentum_summary or {},
+        model_info=model_info or {},
     )
 
     mailjet = MailjetClient(
@@ -431,6 +433,53 @@ def _build_allocation_section(budgets: dict[str, float]) -> str:
     )
 
 
+def _build_model_info_section(model_info: dict[str, object]) -> str:
+    """Genera la seccion HTML con informacion del modelo ML."""
+    if not model_info:
+        return ""
+
+    trained_at = model_info.get("trained_at", "Desconocido")
+    age_days = model_info.get("age_days", -1)
+    retrain_interval = model_info.get("retrain_interval_days", 7)
+    status = model_info.get("status", "desconocido")
+
+    if age_days < 0:
+        age_label = "Sin modelo"
+        age_color = "#dc3545"
+    elif age_days == 0:
+        age_label = "Hoy"
+        age_color = "#28a745"
+    elif age_days <= retrain_interval:
+        age_label = f"Hace {age_days} dia{'s' if age_days != 1 else ''}"
+        age_color = "#28a745"
+    else:
+        age_label = f"Hace {age_days} dias (ATRASADO)"
+        age_color = "#dc3545"
+
+    status_color = "#28a745" if status == "ok" else "#dc3545"
+    status_label = "Al dia" if status == "ok" else "Necesita re-entrenamiento"
+
+    _cell = 'style="padding:6px;border:1px solid #ddd"'
+    return (
+        '<h2>Modelo ML</h2>'
+        '<table style="border-collapse:collapse;width:100%">'
+        '<tr>'
+        f'<td {_cell}><strong>Ultimo entrenamiento</strong></td>'
+        f'<td {_cell}>{trained_at}</td>'
+        '</tr><tr>'
+        f'<td {_cell}><strong>Antigueedad</strong></td>'
+        f'<td {_cell} style="color:{age_color};font-weight:bold">{age_label}</td>'
+        '</tr><tr>'
+        f'<td {_cell}><strong>Re-entrenamiento cada</strong></td>'
+        f'<td {_cell}>{retrain_interval} dias</td>'
+        '</tr><tr>'
+        f'<td {_cell}><strong>Estado</strong></td>'
+        f'<td {_cell} style="color:{status_color};font-weight:bold">{status_label}</td>'
+        '</tr>'
+        '</table>'
+    )
+
+
 def _build_html_body(
     portfolio_before: dict[str, float],
     portfolio_after: dict[str, float],
@@ -443,6 +492,7 @@ def _build_html_body(
     allocation_budgets: dict[str, float] | None = None,
     dca_actions: list[DCAAction] | None = None,
     momentum_summary: dict[str, object] | None = None,
+    model_info: dict[str, object] | None = None,
 ) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     pnl = total_value_after - total_value_before
@@ -561,6 +611,7 @@ def _build_html_body(
         f"{_build_dca_section(dca_summary or {}, dca_actions or [])}"
         f"{_build_momentum_section(momentum_summary or {})}"
         f"{_build_allocation_section(allocation_budgets or {})}"
+        f"{_build_model_info_section(model_info or {})}"
         "<h2>Top 20 Predicciones</h2>"
         f"{preds_section}"
         "<h2>Cartera Actual</h2>"
