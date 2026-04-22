@@ -170,10 +170,10 @@ class MomentumConfig:
 class AllocationConfig:
     """Reparto del balance entre estrategias (virtual wallets)."""
 
-    prediction_pct: float = 0.35   # 35% para bot de prediccion
+    prediction_pct: float = 0.60   # 60% para bot de prediccion ML
     dca_pct: float = 0.20          # 20% para DCA inteligente
-    momentum_pct: float = 0.35     # 35% para momentum
-    reserve_pct: float = 0.10      # 10% reserva intocable
+    momentum_pct: float = 0.20     # 20% para momentum
+    reserve_pct: float = 0.00      # 0% reserva
 
 
 @dataclass(frozen=True)
