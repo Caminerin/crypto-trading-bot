@@ -28,7 +28,7 @@ class BinanceConfig:
 class ModelConfig:
     """Parámetros del modelo predictivo."""
 
-    top_n_coins: int = 75
+    top_n_coins: int = 50
     confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.65"))
     target_pct_change: float = 0.05  # 5% TP
     stop_loss_pct: float = 0.05  # 5% SL para labels (ratio 1:1)
