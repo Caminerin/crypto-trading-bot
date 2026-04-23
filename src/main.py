@@ -264,6 +264,106 @@ def run_daily(config: AppConfig | None = None) -> None:
             )
 
     # ----------------------------------------------------------
+    # 6a-post. Gestionar ordenes limit pendientes de la ejecucion anterior
+    # ----------------------------------------------------------
+    # Si en la ejecucion anterior se colocaron limit buys que no se
+    # ejecutaron al instante, comprobamos su estado:
+    #   - FILLED → registrar en el book y colocar OCO
+    #   - Cualquier otro estado → cancelar la orden
+    if not is_paper and trading_client is not None and pred_book.pending_orders:
+        logger.info(
+            "Comprobando %d ordenes limit pendientes...",
+            len(pred_book.pending_orders),
+        )
+        for pending in list(pred_book.pending_orders):
+            try:
+                order_info = trading_client.get_order(
+                    pending.symbol, pending.order_id,
+                )
+                status = order_info.get("status", "UNKNOWN")
+                logger.info(
+                    "Pending %s (orderId=%d): status=%s",
+                    pending.symbol,
+                    pending.order_id,
+                    status,
+                )
+                if status == "FILLED":
+                    # Extraer fills y registrar en el book
+                    fills = order_info.get("fills", [])
+                    if fills:
+                        total_qty = sum(float(f["qty"]) for f in fills)
+                        avg_price = (
+                            sum(
+                                float(f["price"]) * float(f["qty"])
+                                for f in fills
+                            ) / total_qty
+                            if total_qty > 0
+                            else pending.limit_price
+                        )
+                    else:
+                        total_qty = float(
+                            order_info.get("executedQty", 0),
+                        )
+                        avg_price = float(
+                            order_info.get("price", pending.limit_price),
+                        )
+                    if total_qty > 0:
+                        pred_book.record_buy(
+                            symbol=pending.symbol,
+                            price=avg_price,
+                            quantity=total_qty,
+                            usdt_spent=pending.quote_qty,
+                        )
+                        # Colocar OCO sobre el precio de entrada real
+                        oco_qty = total_qty
+                        try:
+                            real_bal = trading_client.get_portfolio()
+                            base = pending.symbol.replace(quote, "")
+                            rb = real_bal.get(base, 0.0)
+                            if 0 < rb < total_qty:
+                                oco_qty = rb
+                        except Exception:
+                            pass
+                        trading_client.place_oco_sell(
+                            symbol=pending.symbol,
+                            quantity=oco_qty,
+                            entry_price=avg_price,
+                        )
+                        logger.info(
+                            "Pending %s ejecutada: qty=%.8f price=%.8f "
+                            "→ OCO colocada sobre precio de entrada",
+                            pending.symbol,
+                            total_qty,
+                            avg_price,
+                        )
+                    pred_book.remove_pending_order(pending.order_id)
+                else:
+                    # No ejecutada → cancelar
+                    trading_client.cancel_open_orders(pending.symbol)
+                    pred_book.remove_pending_order(pending.order_id)
+                    logger.info(
+                        "Pending %s cancelada (status=%s)",
+                        pending.symbol,
+                        status,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Error comprobando pending %s (orderId=%d): %s",
+                    pending.symbol,
+                    pending.order_id,
+                    exc,
+                )
+                # En caso de error, intentar cancelar por seguridad
+                try:
+                    trading_client.cancel_open_orders(pending.symbol)
+                except Exception:
+                    pass
+                pred_book.remove_pending_order(pending.order_id)
+
+        # Recalcular budget tras procesar pending orders
+        prediction_budget = allocator.get_budget("prediction")
+
+    # ----------------------------------------------------------
     # 6a. Vender posiciones expiradas (ventana temporal cumplida)
     # ----------------------------------------------------------
     # Las posiciones se cierran por 3 vías:
@@ -336,8 +436,19 @@ def run_daily(config: AppConfig | None = None) -> None:
     # 6b. Compras nuevas (decide_actions ya solo genera compras)
     # ----------------------------------------------------------
     # Recalcular presupuesto tras posibles ventas por expiración
-    pred_quote_available = max(0.0, prediction_budget - pred_book.invested_usdt)
+    # Descontar tambien USDT reservado en ordenes limit pendientes
+    pred_quote_available = max(
+        0.0,
+        prediction_budget - pred_book.invested_usdt - pred_book.pending_invested_usdt,
+    )
     pred_portfolio = pred_book.get_portfolio_dict(quote)
+
+    # Incluir simbolos con ordenes limit pendientes como slots ocupados
+    # para que decide_actions no intente comprar la misma moneda.
+    for sym in pred_book.pending_symbols:
+        base = sym.replace(quote, "")
+        if base not in pred_portfolio:
+            pred_portfolio[base] = 0.01  # placeholder
 
     current_prices: dict[str, float] = {}
     for sym, _ in recommendations:
@@ -361,9 +472,18 @@ def run_daily(config: AppConfig | None = None) -> None:
         current_prices=current_prices,
         strategy_quote_available=pred_quote_available,
     )
+
+    # Asignar limit_pct a las compras de prediccion
+    buy_discount = config.model.buy_limit_discount
+    if buy_discount > 0:
+        for a in actions:
+            if a.action == "BUY":
+                a.limit_pct = buy_discount
+
     logger.info("Acciones predicción: %d", len(actions))
     for a in actions:
-        logger.info("  %s %s | %s", a.action, a.symbol, a.reason)
+        extra = f" (limit -{a.limit_pct:.0%})" if a.limit_pct > 0 else ""
+        logger.info("  %s %s%s | %s", a.action, a.symbol, extra, a.reason)
 
     # Ejecutar órdenes de predicción
     pred_results = executor.execute(actions)
@@ -379,13 +499,24 @@ def run_daily(config: AppConfig | None = None) -> None:
         if not result.success:
             continue
         action = result.action
-        if action.action == "BUY" and result.executed_qty > 0:
-            pred_book.record_buy(
-                symbol=action.symbol,
-                price=result.executed_price,
-                quantity=result.executed_qty,
-                usdt_spent=action.quote_qty,
-            )
+        if action.action == "BUY":
+            if result.order_status == "FILLED" and result.executed_qty > 0:
+                # Limit buy ejecutada al instante → registrar posicion
+                pred_book.record_buy(
+                    symbol=action.symbol,
+                    price=result.executed_price,
+                    quantity=result.executed_qty,
+                    usdt_spent=action.quote_qty,
+                )
+            elif result.order_id > 0 and result.order_status != "FILLED":
+                # Limit buy pendiente → guardar para comprobar en la
+                # siguiente ejecucion del bot.
+                pred_book.record_pending_order(
+                    symbol=action.symbol,
+                    order_id=result.order_id,
+                    quote_qty=action.quote_qty,
+                    limit_price=result.executed_price or 0.0,
+                )
 
     # ------------------------------------------------------------------
     # 7. ESTRATEGIA 2: DCA Inteligente (usa budget "dca")

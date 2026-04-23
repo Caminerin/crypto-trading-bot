@@ -25,6 +25,7 @@ class TradeAction:
     base_qty: float  # Cantidad de cripto a vender (venta) o 0 (compra)
     reason: str
     probability: float  # Probabilidad del modelo (solo compras)
+    limit_pct: float = 0.0  # >0 = limit buy con descuento (ej. 0.01 = -1%)
 
 
 # Activos fiat / no-crypto que pueden aparecer en la cartera de Binance

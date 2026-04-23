@@ -436,6 +436,62 @@ class BinanceTradingClient:
         )
         return order
 
+    def place_limit_buy(
+        self,
+        symbol: str,
+        quote_qty: float,
+        limit_price: float,
+    ) -> dict[str, Any]:
+        """Compra limit a *limit_price*.
+
+        Calcula la cantidad base a partir del monto en quote y el precio,
+        redondeando al step_size y tick_size del par.  La orden es GTC
+        (Good Till Cancelled).
+        """
+        # Redondear precio a tick_size
+        price_filter = self.get_price_filter(symbol)
+        if price_filter:
+            tick_size = price_filter["tick_size"]
+            limit_price = self.round_to_tick_size(limit_price, tick_size)
+            tick_precision = max(
+                0, int(round(-math.log10(tick_size))),
+            ) if tick_size > 0 else 8
+        else:
+            tick_precision = 8
+
+        # Calcular cantidad base y redondear a step_size
+        raw_qty = quote_qty / limit_price if limit_price > 0 else 0.0
+        lot_filter = self.get_lot_size_filter(symbol)
+        if lot_filter:
+            step_size = lot_filter["step_size"]
+            quantity = self.round_to_step_size(raw_qty, step_size)
+            step_precision = max(
+                0, int(round(-math.log10(step_size))),
+            ) if step_size > 0 else 8
+        else:
+            quantity = raw_qty
+            step_precision = 8
+
+        logger.info(
+            "LIMIT BUY %s qty=%s price=%s (~%.2f %s)",
+            symbol,
+            f"{quantity:.{step_precision}f}",
+            f"{limit_price:.{tick_precision}f}",
+            quote_qty,
+            self._portfolio_cfg.quote_asset,
+        )
+        order = self._client.order_limit_buy(
+            symbol=symbol,
+            quantity=f"{quantity:.{step_precision}f}",
+            price=f"{limit_price:.{tick_precision}f}",
+            timeInForce="GTC",
+        )
+        return order
+
+    def get_order(self, symbol: str, order_id: int) -> dict[str, Any]:
+        """Consulta el estado de una orden por ID."""
+        return self._client.get_order(symbol=symbol, orderId=order_id)
+
     def place_market_sell(self, symbol: str, quantity: float) -> dict[str, Any]:
         """Vende a mercado la cantidad indicada."""
         logger.info("MARKET SELL %s qty=%.8f", symbol, quantity)
