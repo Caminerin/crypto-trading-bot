@@ -190,11 +190,16 @@ class BinanceDataClient:
         else:
             tickers = self._client.get_ticker()
 
+        _STABLECOIN_BASES = (
+            "USDC", "USDT", "BUSD", "TUSD", "FDUSD", "DAI",
+            "UST", "USDP", "GUSD", "FRAX", "LUSD", "PYUSD",
+            "USDD", "EURC", "EURT",
+        )
         usdt_tickers = [
             t
             for t in tickers
             if t["symbol"].endswith(quote)
-            and not t["symbol"].startswith(("USDC", "BUSD", "TUSD", "FDUSD", "DAI"))
+            and not t["symbol"].startswith(_STABLECOIN_BASES)
         ]
         sorted_tickers = sorted(usdt_tickers, key=lambda t: float(t["quoteVolume"]), reverse=True)
         return [t["symbol"] for t in sorted_tickers[:top_n]]

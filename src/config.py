@@ -28,7 +28,7 @@ class BinanceConfig:
 class ModelConfig:
     """Parámetros del modelo predictivo."""
 
-    top_n_coins: int = 50
+    top_n_coins: int = 20
     confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.65"))
     target_pct_change: float = 0.05  # 5% TP
     stop_loss_pct: float = 0.05  # 5% SL para labels (ratio 1:1)
@@ -139,7 +139,7 @@ DEFAULT_ASSET_POLICIES: dict[str, DCAAssetPolicy] = {
 class DCAConfig:
     """Parametros de la estrategia DCA Inteligente."""
 
-    enabled: bool = True
+    enabled: bool = False
     assets: tuple[str, ...] = (
         f"BTC{_QUOTE}", f"ETH{_QUOTE}", f"BNB{_QUOTE}",
     )
@@ -154,7 +154,7 @@ class DCAConfig:
 class MomentumConfig:
     """Parámetros de la estrategia Momentum."""
 
-    enabled: bool = True
+    enabled: bool = False
     assets: tuple[str, ...] = (
         f"BTC{_QUOTE}", f"ETH{_QUOTE}", f"BNB{_QUOTE}",
         f"SOL{_QUOTE}", f"XRP{_QUOTE}",
@@ -171,9 +171,9 @@ class MomentumConfig:
 class AllocationConfig:
     """Reparto del balance entre estrategias (virtual wallets)."""
 
-    prediction_pct: float = 0.60   # 60% para bot de prediccion ML
-    dca_pct: float = 0.20          # 20% para DCA inteligente
-    momentum_pct: float = 0.20     # 20% para momentum
+    prediction_pct: float = 1.00   # 100% para bot de predicción ML
+    dca_pct: float = 0.00          # DCA deshabilitado
+    momentum_pct: float = 0.00     # Momentum deshabilitado
     reserve_pct: float = 0.00      # 0% reserva
 
 

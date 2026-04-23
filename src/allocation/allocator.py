@@ -28,10 +28,10 @@ ALLOCATION_FILE = DATA_DIR / "allocation.json"
 
 # Porcentajes por defecto
 DEFAULT_ALLOCATION = {
-    "prediction": 0.35,
-    "dca": 0.20,
-    "momentum": 0.35,
-    "reserve": 0.10,
+    "prediction": 1.00,
+    "dca": 0.00,
+    "momentum": 0.00,
+    "reserve": 0.00,
 }
 
 

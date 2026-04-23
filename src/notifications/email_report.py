@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from src.config import _QUOTE, DEFAULT_ASSET_POLICIES, DEFAULT_MOMENTUM_POLICIES, EmailConfig
 from src.execution.executor import ExecutionResult
+from src.market.regime import MarketRegimeResult
 from src.strategies.dca import DCAAction
 from src.utils.logger import get_logger
 
@@ -36,6 +37,7 @@ def send_daily_report(
     dca_actions: list[DCAAction] | None = None,
     momentum_summary: dict[str, object] | None = None,
     model_info: dict[str, object] | None = None,
+    market_regime: MarketRegimeResult | None = None,
 ) -> bool:
     """Envia el reporte diario por email.
 
@@ -65,6 +67,7 @@ def send_daily_report(
         dca_actions=dca_actions or [],
         momentum_summary=momentum_summary or {},
         model_info=model_info or {},
+        market_regime=market_regime,
     )
 
     mailjet = MailjetClient(
@@ -480,6 +483,59 @@ def _build_model_info_section(model_info: dict[str, object]) -> str:
     )
 
 
+def _build_market_regime_section(
+    market_regime: MarketRegimeResult | None,
+) -> str:
+    """Genera la sección HTML del filtro de régimen de mercado."""
+    if market_regime is None:
+        return (
+            '<h2>Régimen de Mercado</h2>'
+            '<p style="color:#999">Sin datos de BTC suficientes para evaluar.</p>'
+        )
+
+    if market_regime.allow_buys:
+        status_label = "FAVORABLE"
+        status_color = "#28a745"
+        status_bg = "#d4edda"
+    else:
+        status_label = "ADVERSO — compras bloqueadas"
+        status_color = "#dc3545"
+        status_bg = "#f8d7da"
+
+    _cell = 'style="padding:6px;border:1px solid #ddd"'
+
+    reasons_html = ""
+    if market_regime.reasons:
+        items = "".join(f"<li>{r}</li>" for r in market_regime.reasons)
+        reasons_html = (
+            '<tr>'
+            f'<td {_cell}><strong>Razones de bloqueo</strong></td>'
+            f'<td {_cell} style="color:#dc3545">{items}</td>'
+            '</tr>'
+        )
+
+    return (
+        '<h2>Régimen de Mercado</h2>'
+        f'<div style="background:{status_bg};padding:10px;border-radius:6px;'
+        f'margin-bottom:10px">'
+        f'<strong style="color:{status_color};font-size:16px">{status_label}</strong>'
+        '</div>'
+        '<table style="border-collapse:collapse;width:100%">'
+        '<tr>'
+        f'<td {_cell}><strong>BTC ROC 24h</strong></td>'
+        f'<td {_cell}>{market_regime.btc_roc_24h:+.1%}</td>'
+        '</tr><tr>'
+        f'<td {_cell}><strong>BTC RSI 14</strong></td>'
+        f'<td {_cell}>{market_regime.btc_rsi_14:.1f}</td>'
+        '</tr><tr>'
+        f'<td {_cell}><strong>Monedas subiendo 24h</strong></td>'
+        f'<td {_cell}>{market_regime.pct_coins_up_24h:.0%}</td>'
+        '</tr>'
+        f'{reasons_html}'
+        '</table>'
+    )
+
+
 def _build_html_body(
     portfolio_before: dict[str, float],
     portfolio_after: dict[str, float],
@@ -493,6 +549,7 @@ def _build_html_body(
     dca_actions: list[DCAAction] | None = None,
     momentum_summary: dict[str, object] | None = None,
     model_info: dict[str, object] | None = None,
+    market_regime: MarketRegimeResult | None = None,
 ) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     pnl = total_value_after - total_value_before
@@ -611,6 +668,7 @@ def _build_html_body(
         f"{_build_dca_section(dca_summary or {}, dca_actions or [])}"
         f"{_build_momentum_section(momentum_summary or {})}"
         f"{_build_allocation_section(allocation_budgets or {})}"
+        f"{_build_market_regime_section(market_regime)}"
         f"{_build_model_info_section(model_info or {})}"
         "<h2>Top 20 Predicciones</h2>"
         f"{preds_section}"
