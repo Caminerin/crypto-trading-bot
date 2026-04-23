@@ -5,6 +5,7 @@ Carga variables de entorno y define constantes del sistema.
 Cada parámetro tiene un valor por defecto sensato para facilitar el arranque.
 """
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,8 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "models"
 MODELS_DIR.mkdir(exist_ok=True)
+DATA_DIR = BASE_DIR / "data"
+BEST_TPSL_FILE = DATA_DIR / "best_tpsl.json"
 
 
 @dataclass(frozen=True)
@@ -204,6 +207,24 @@ class AppConfig:
         return self.trading_mode == "paper"
 
 
+def _load_best_tpsl() -> RiskConfig:
+    """Lee data/best_tpsl.json y devuelve RiskConfig con esos valores.
+
+    Si el archivo no existe o es inválido, devuelve los defaults.
+    """
+    if not BEST_TPSL_FILE.exists():
+        return RiskConfig()
+    try:
+        raw = json.loads(BEST_TPSL_FILE.read_text())
+        tp = float(raw["take_profit_pct"])
+        sl = float(raw["stop_loss_pct"])
+        if tp > 0 and sl > 0:
+            return RiskConfig(take_profit_pct=tp, stop_loss_pct=sl)
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        pass
+    return RiskConfig()
+
+
 def load_config() -> AppConfig:
     """Crea y devuelve la configuración de la aplicación."""
-    return AppConfig()
+    return AppConfig(risk=_load_best_tpsl())
