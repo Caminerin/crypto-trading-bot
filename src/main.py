@@ -22,6 +22,7 @@ import pandas as pd
 
 from src.allocation.allocator import PortfolioAllocator
 from src.config import (
+    BEST_TPSL_FILE,
     DEFAULT_ASSET_POLICIES,
     DEFAULT_MOMENTUM_POLICIES,
     MODELS_DIR,
@@ -51,6 +52,12 @@ def run_daily(config: AppConfig | None = None) -> None:
     now = datetime.now(timezone.utc).isoformat()
     logger.info("INICIO — %s — modo=%s", now, config.trading_mode)
     logger.info("=" * 60)
+
+    # Mostrar TP/SL activos (auto-seleccionados o por defecto)
+    tp = config.risk.take_profit_pct
+    sl = config.risk.stop_loss_pct
+    src = "best_tpsl.json" if BEST_TPSL_FILE.exists() else "defaults"
+    logger.info("TP=%.1f%% / SL=%.1f%% (fuente: %s)", tp * 100, sl * 100, src)
 
     # ------------------------------------------------------------------
     # 1. Inicializar clientes

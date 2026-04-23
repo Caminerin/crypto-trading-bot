@@ -17,10 +17,12 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -28,6 +30,10 @@ import requests
 
 from src.config import load_config
 from src.model.predictor import PricePredictor
+
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DATA_DIR.mkdir(exist_ok=True)
+BEST_TPSL_FILE = DATA_DIR / "best_tpsl.json"
 
 # ---------------------------------------------------------------------------
 # Descarga de datos
@@ -778,6 +784,33 @@ def main() -> None:
         # Ordenar por P&L compuesto descendente
         tpsl_rows.sort(key=lambda x: x["compound_pnl"], reverse=True)
         print_tpsl_sweep_table(tpsl_rows)
+
+        # Guardar la mejor combinación en data/best_tpsl.json
+        with_trades = [r for r in tpsl_rows if r["trades"] > 0]
+        if with_trades:
+            best = with_trades[0]  # ya ordenado por compound_pnl desc
+            best_data = {
+                "take_profit_pct": best["tp_pct"] / 100,
+                "stop_loss_pct": best["sl_pct"] / 100,
+                "compound_pnl_pct": round(best["compound_pnl"], 2),
+                "avg_pnl_per_trade": round(best["avg_pnl_per_trade"], 4),
+                "win_pct": round(best["win_pct"], 1),
+                "trades": best["trades"],
+                "max_drawdown_pct": best["max_dd"],
+                "sweep_date": datetime.now(timezone.utc).isoformat(),
+                "sweep_days": args.days,
+                "sweep_threshold": thr,
+            }
+            BEST_TPSL_FILE.write_text(json.dumps(best_data, indent=2))
+            print(
+                f"  \u2192 Guardado en {BEST_TPSL_FILE}: "
+                f"TP={best_data['take_profit_pct']:.0%} / "
+                f"SL={best_data['stop_loss_pct']:.0%}"
+            )
+            print(
+                "  El bot usar\u00e1 estos valores autom\u00e1ticamente "
+                "en la pr\u00f3xima ejecuci\u00f3n."
+            )
 
     elif args.sweep:
         # Backtest con threshold unico (65%)
