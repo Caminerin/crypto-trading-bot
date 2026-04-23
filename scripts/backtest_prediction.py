@@ -541,7 +541,70 @@ def print_sweep_table(sweep_results: list[dict]) -> None:
             f" ({'+' if best['pnl_pct'] >= 0 else ''}{best['pnl_pct']:.1f}%)"
         )
     else:
-        print("  >> Ningun threshold produjo trades.")
+        print("  >> Ning\u00fan threshold produjo trades.")
+    print()
+
+
+def _generate_tpsl_combinations() -> list[tuple[float, float]]:
+    """Genera combinaciones de TP y SL donde TP >= SL."""
+    tp_values = [0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10]
+    sl_values = [0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10]
+    combos: list[tuple[float, float]] = []
+    for tp in tp_values:
+        for sl in sl_values:
+            if tp >= sl:
+                combos.append((tp, sl))
+    return combos
+
+
+def print_tpsl_sweep_table(rows: list[dict]) -> None:
+    """Imprime tabla comparativa de combinaciones TP-SL."""
+    print()
+    print("=" * 95)
+    print("  COMPARATIVA TP-SL (TP \u2265 SL)")
+    print("=" * 95)
+    print()
+    header = (
+        f"  {'TP%':>5s} | {'SL%':>5s} | {'Trades':>7s} | "
+        f"{'Win%':>5s} | {'TP':>4s} | {'SL':>4s} | "
+        f"{'P&L medio':>10s} | {'P&L comp.':>10s} | "
+        f"{'MaxDD':>6s}"
+    )
+    print(header)
+    print("  " + "-" * 91)
+    for r in rows:
+        wr = f"{r['win_pct']:.0f}%" if r["sells"] > 0 else "N/A"
+        s_avg = "+" if r["avg_pnl_per_trade"] >= 0 else ""
+        s_comp = "+" if r["compound_pnl"] >= 0 else ""
+        print(
+            f"  {r['tp_pct']:>4.0f}% | {r['sl_pct']:>4.0f}% | "
+            f"{r['trades']:>7d} | {wr:>5s} | "
+            f"{r['take_profits']:>4d} | {r['stop_losses']:>4d} | "
+            f"{s_avg}${r['avg_pnl_per_trade']:>8.2f} | "
+            f"{s_comp}{r['compound_pnl']:>8.1f}% | "
+            f"-{r['max_dd']:.1f}%"
+        )
+    print()
+    print("=" * 95)
+
+    with_trades = [r for r in rows if r["trades"] > 0]
+    if with_trades:
+        best_comp = max(with_trades, key=lambda r: r["compound_pnl"])
+        best_avg = max(with_trades, key=lambda r: r["avg_pnl_per_trade"])
+        print(
+            f"  >> Mejor P&L compuesto: TP={best_comp['tp_pct']:.0f}% / "
+            f"SL={best_comp['sl_pct']:.0f}% \u2192 "
+            f"{'+' if best_comp['compound_pnl'] >= 0 else ''}"
+            f"{best_comp['compound_pnl']:.1f}%"
+        )
+        print(
+            f"  >> Mejor P&L medio/trade: TP={best_avg['tp_pct']:.0f}% / "
+            f"SL={best_avg['sl_pct']:.0f}% \u2192 "
+            f"{'+' if best_avg['avg_pnl_per_trade'] >= 0 else ''}"
+            f"${best_avg['avg_pnl_per_trade']:.2f}"
+        )
+    else:
+        print("  >> Ninguna combinaci\u00f3n produjo trades.")
     print()
 
 
@@ -579,6 +642,10 @@ def main() -> None:
         "--sweep", action="store_true",
         help="Ejecutar barrido de thresholds (solo 65%%)",
     )
+    parser.add_argument(
+        "--sweep-tpsl", action="store_true",
+        help="Barrido de combinaciones TP-SL (siempre TP >= SL)",
+    )
     args = parser.parse_args()
 
     config = load_config()
@@ -594,13 +661,16 @@ def main() -> None:
     tickers = resp.json()
 
     # Filtrar por quote asset y ordenar por volumen
+    _STABLECOIN_BASES = (
+        "USDC", "USDT", "BUSD", "TUSD", "FDUSD", "DAI",
+        "UST", "USDP", "GUSD", "FRAX", "LUSD", "PYUSD",
+        "USDD", "EURC", "EURT",
+    )
+    _FIAT_BASES = ("EUR", "GBP", "TRY", "BRL")
     quote_tickers = [
         t for t in tickers
         if t["symbol"].endswith(quote)
-        and not any(
-            t["symbol"].startswith(s)
-            for s in ("USDC", "USDT", "BUSD", "DAI", "TUSD", "FDUSD", "EUR", "GBP", "TRY", "BRL")
-        )
+        and not t["symbol"].startswith(_STABLECOIN_BASES + _FIAT_BASES)
     ]
     quote_tickers.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)
     top_symbols = [t["symbol"] for t in quote_tickers[:args.coins]]
@@ -628,7 +698,88 @@ def main() -> None:
     # Crear predictor y ejecutar backtest
     predictor = PricePredictor(config.model)
 
-    if args.sweep:
+    if args.sweep_tpsl:
+        # ---------------------------------------------------------
+        # Barrido TP-SL: entrena una vez, recorre combinaciones
+        # ---------------------------------------------------------
+        combos = _generate_tpsl_combinations()
+        thr = args.threshold
+        print(f"\n  Barrido TP-SL: {len(combos)} combinaciones (threshold={thr:.0%})")
+        print("  Entrenando modelo una sola vez...")
+
+        # Primera ejecuci\u00f3n entrena el modelo
+        first_tp, first_sl = combos[0]
+        first_result = run_backtest(
+            klines_by_symbol=klines_by_symbol,
+            predictor=predictor,
+            budget=args.budget,
+            threshold=thr,
+            tp_pct=first_tp,
+            sl_pct=first_sl,
+            max_positions=args.max_positions,
+            quote=quote,
+            skip_train=False,
+        )
+
+        tpsl_rows: list[dict] = []
+
+        def _build_tpsl_row(
+            r: BacktestResult, tp: float, sl: float,
+        ) -> dict:
+            sells = r.sells
+            win_pct = (r.wins / sells * 100) if sells > 0 else 0.0
+            # P&L medio por operaci\u00f3n (realista)
+            avg_pnl = r.total_profit / sells if sells > 0 else 0.0
+            # P&L compuesto (simulando reinversi\u00f3n desde budget inicial)
+            compound = (
+                (r.final_value / r.initial_budget - 1) * 100
+                if r.initial_budget > 0 else 0.0
+            )
+            return {
+                "tp_pct": tp * 100,
+                "sl_pct": sl * 100,
+                "trades": r.total_trades,
+                "sells": sells,
+                "wins": r.wins,
+                "losses": r.losses,
+                "take_profits": r.take_profits,
+                "stop_losses": r.stop_losses,
+                "win_pct": win_pct,
+                "avg_pnl_per_trade": avg_pnl,
+                "compound_pnl": compound,
+                "max_dd": r.max_drawdown_pct,
+            }
+
+        tpsl_rows.append(_build_tpsl_row(first_result, first_tp, first_sl))
+        print(
+            f"  [1/{len(combos)}] TP={first_tp:.0%} SL={first_sl:.0%} \u2192 "
+            f"{first_result.total_trades} trades"
+        )
+
+        # Resto de combinaciones reutilizando modelo ya entrenado
+        for idx, (tp, sl) in enumerate(combos[1:], start=2):
+            r = run_backtest(
+                klines_by_symbol=klines_by_symbol,
+                predictor=predictor,
+                budget=args.budget,
+                threshold=thr,
+                tp_pct=tp,
+                sl_pct=sl,
+                max_positions=args.max_positions,
+                quote=quote,
+                skip_train=True,
+            )
+            tpsl_rows.append(_build_tpsl_row(r, tp, sl))
+            print(
+                f"  [{idx}/{len(combos)}] TP={tp:.0%} SL={sl:.0%} \u2192 "
+                f"{r.total_trades} trades"
+            )
+
+        # Ordenar por P&L compuesto descendente
+        tpsl_rows.sort(key=lambda x: x["compound_pnl"], reverse=True)
+        print_tpsl_sweep_table(tpsl_rows)
+
+    elif args.sweep:
         # Backtest con threshold unico (65%)
         thr = 0.65
         result = run_backtest(

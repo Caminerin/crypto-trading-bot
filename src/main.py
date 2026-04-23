@@ -30,6 +30,7 @@ from src.config import (
 )
 from src.data.binance_client import BinanceDataClient, BinanceTradingClient
 from src.execution.executor import ExecutionResult, OrderExecutor
+from src.market.regime import MarketRegimeResult, evaluate_market_regime
 from src.model.predictor import PricePredictor
 from src.notifications.email_report import send_daily_report
 from src.portfolio.manager import PortfolioManager, TradeAction
@@ -433,7 +434,33 @@ def run_daily(config: AppConfig | None = None) -> None:
             allocator.add_profit("prediction", profit)
 
     # ----------------------------------------------------------
-    # 6b. Compras nuevas (decide_actions ya solo genera compras)
+    # 6b. Filtro de régimen de mercado
+    # ----------------------------------------------------------
+    # Evalúa BTC ROC 24h, BTC RSI 14 y amplitud de mercado.
+    # Si el mercado es adverso, se saltan las compras nuevas
+    # pero se mantiene la gestión de posiciones (TP/SL/expiración).
+    market_regime: MarketRegimeResult | None = None
+    btc_symbol = f"BTC{quote}"
+    btc_klines = klines.get(btc_symbol)
+
+    if btc_klines is not None and len(btc_klines) >= 25:
+        market_regime = evaluate_market_regime(btc_klines, klines)
+    else:
+        logger.warning(
+            "Sin datos de BTC suficientes para filtro de mercado — "
+            "se permite operar por defecto."
+        )
+
+    buys_blocked = market_regime is not None and not market_regime.allow_buys
+
+    if buys_blocked:
+        logger.warning(
+            "COMPRAS BLOQUEADAS por filtro de mercado. "
+            "Las posiciones existentes (TP/SL/expiración) siguen activas."
+        )
+
+    # ----------------------------------------------------------
+    # 6c. Compras nuevas (decide_actions ya solo genera compras)
     # ----------------------------------------------------------
     # Recalcular presupuesto tras posibles ventas por expiración
     # Descontar tambien USDT reservado en ordenes limit pendientes
@@ -465,58 +492,65 @@ def run_daily(config: AppConfig | None = None) -> None:
             except Exception:
                 pass
 
-    actions = portfolio_mgr.decide_actions(
-        current_portfolio=pred_portfolio,
-        total_value_usdt=prediction_budget,
-        recommendations=recommendations,
-        current_prices=current_prices,
-        strategy_quote_available=pred_quote_available,
-    )
+    pred_results: list[ExecutionResult] = []
 
-    # Asignar limit_pct a las compras de prediccion
-    buy_discount = config.model.buy_limit_discount
-    if buy_discount > 0:
+    if buys_blocked:
+        actions: list[TradeAction] = []
+        logger.info(
+            "Compras nuevas omitidas — mercado adverso. "
+            "Recomendaciones ignoradas: %d",
+            len(recommendations),
+        )
+    else:
+        actions = portfolio_mgr.decide_actions(
+            current_portfolio=pred_portfolio,
+            total_value_usdt=prediction_budget,
+            recommendations=recommendations,
+            current_prices=current_prices,
+            strategy_quote_available=pred_quote_available,
+        )
+
+        # Asignar limit_pct a las compras de prediccion
+        buy_discount = config.model.buy_limit_discount
+        if buy_discount > 0:
+            for a in actions:
+                if a.action == "BUY":
+                    a.limit_pct = buy_discount
+
+        logger.info("Acciones predicción: %d", len(actions))
         for a in actions:
-            if a.action == "BUY":
-                a.limit_pct = buy_discount
+            extra = f" (limit -{a.limit_pct:.0%})" if a.limit_pct > 0 else ""
+            logger.info("  %s %s%s | %s", a.action, a.symbol, extra, a.reason)
 
-    logger.info("Acciones predicción: %d", len(actions))
-    for a in actions:
-        extra = f" (limit -{a.limit_pct:.0%})" if a.limit_pct > 0 else ""
-        logger.info("  %s %s%s | %s", a.action, a.symbol, extra, a.reason)
+        # Ejecutar órdenes de predicción
+        pred_results = executor.execute(actions)
+        successful = sum(1 for r in pred_results if r.success)
+        logger.info(
+            "Órdenes predicción: %d/%d exitosas",
+            successful,
+            len(pred_results),
+        )
 
-    # Ejecutar órdenes de predicción
-    pred_results = executor.execute(actions)
-    successful = sum(1 for r in pred_results if r.success)
-    logger.info(
-        "Órdenes predicción: %d/%d exitosas",
-        successful,
-        len(pred_results),
-    )
-
-    # Registrar compras en el libro de prediction
-    for result in pred_results:
-        if not result.success:
-            continue
-        action = result.action
-        if action.action == "BUY":
-            if result.order_status == "FILLED" and result.executed_qty > 0:
-                # Limit buy ejecutada al instante → registrar posicion
-                pred_book.record_buy(
-                    symbol=action.symbol,
-                    price=result.executed_price,
-                    quantity=result.executed_qty,
-                    usdt_spent=action.quote_qty,
-                )
-            elif result.order_id > 0 and result.order_status != "FILLED":
-                # Limit buy pendiente → guardar para comprobar en la
-                # siguiente ejecucion del bot.
-                pred_book.record_pending_order(
-                    symbol=action.symbol,
-                    order_id=result.order_id,
-                    quote_qty=action.quote_qty,
-                    limit_price=result.executed_price or 0.0,
-                )
+        # Registrar compras en el libro de prediction
+        for result in pred_results:
+            if not result.success:
+                continue
+            action = result.action
+            if action.action == "BUY":
+                if result.order_status == "FILLED" and result.executed_qty > 0:
+                    pred_book.record_buy(
+                        symbol=action.symbol,
+                        price=result.executed_price,
+                        quantity=result.executed_qty,
+                        usdt_spent=action.quote_qty,
+                    )
+                elif result.order_id > 0 and result.order_status != "FILLED":
+                    pred_book.record_pending_order(
+                        symbol=action.symbol,
+                        order_id=result.order_id,
+                        quote_qty=action.quote_qty,
+                        limit_price=result.executed_price or 0.0,
+                    )
 
     # ------------------------------------------------------------------
     # 7. ESTRATEGIA 2: DCA Inteligente (usa budget "dca")
@@ -735,6 +769,7 @@ def run_daily(config: AppConfig | None = None) -> None:
         dca_actions=dca_actions_today,
         momentum_summary=momentum_summary,
         model_info=model_info,
+        market_regime=market_regime,
     )
     if email_sent:
         logger.info("Reporte enviado por email")
