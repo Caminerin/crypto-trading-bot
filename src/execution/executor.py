@@ -30,6 +30,8 @@ class ExecutionResult:
     executed_price: float = 0.0
     commission: float = 0.0
     error: str = ""
+    order_id: int = 0
+    order_status: str = ""  # FILLED, NEW, PARTIALLY_FILLED, etc.
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -79,6 +81,8 @@ class OrderExecutor:
 
         if action.action == "BUY":
             if sim_price > 0:
+                if action.limit_pct > 0:
+                    sim_price = sim_price * (1 - action.limit_pct)
                 executed_qty = action.quote_qty / sim_price
                 executed_price = sim_price
             else:
@@ -105,6 +109,7 @@ class OrderExecutor:
             executed_price=executed_price,
             commission=0.0,
             error="",
+            order_status="FILLED",
         )
 
     def _execute_live(self, action: TradeAction) -> ExecutionResult:
@@ -177,17 +182,58 @@ class OrderExecutor:
                         success=False,
                         error=buy_error,
                     )
-                order = self._client.place_market_buy(action.symbol, action.quote_qty)
+
+                # Limit buy o market buy segun limit_pct
+                if action.limit_pct > 0 and self._data_client is not None:
+                    current_price = self._data_client.get_current_price(
+                        action.symbol,
+                    )
+                    limit_price = current_price * (1 - action.limit_pct)
+                    logger.info(
+                        "BUY %s: limit al %.1f%% descuento "
+                        "(actual=%.8f, limit=%.8f)",
+                        action.symbol,
+                        action.limit_pct * 100,
+                        current_price,
+                        limit_price,
+                    )
+                    order = self._client.place_limit_buy(
+                        action.symbol, action.quote_qty, limit_price,
+                    )
+                else:
+                    order = self._client.place_market_buy(
+                        action.symbol, action.quote_qty,
+                    )
 
             # Extraer datos del resultado
+            order_status = order.get("status", "FILLED")
+            order_id = int(order.get("orderId", 0))
             fills = order.get("fills", [])
             total_qty = sum(float(f["qty"]) for f in fills)
             total_commission = sum(float(f["commission"]) for f in fills)
             avg_price = (
                 sum(float(f["price"]) * float(f["qty"]) for f in fills) / total_qty
                 if total_qty > 0
-                else 0.0
+                else float(order.get("price", 0))
             )
+
+            # Limit buy pendiente (no ejecutada aun)
+            if order_status != "FILLED" and action.action == "BUY":
+                logger.info(
+                    "[LIVE] LIMIT BUY %s pendiente (status=%s, orderId=%d)",
+                    action.symbol,
+                    order_status,
+                    order_id,
+                )
+                return ExecutionResult(
+                    action=action,
+                    success=True,
+                    executed_qty=total_qty,
+                    executed_price=avg_price,
+                    commission=total_commission,
+                    order_id=order_id,
+                    order_status=order_status,
+                )
 
             result = ExecutionResult(
                 action=action,
@@ -195,9 +241,11 @@ class OrderExecutor:
                 executed_qty=total_qty,
                 executed_price=avg_price,
                 commission=total_commission,
+                order_id=order_id,
+                order_status=order_status,
             )
 
-            # Colocar OCO (stop-loss + take-profit) para compras
+            # Colocar OCO (stop-loss + take-profit) para compras ejecutadas
             if action.action == "BUY" and total_qty > 0:
                 # Leer balance real post-compra: Binance cobra comisión
                 # en el activo comprado, así que el saldo disponible es

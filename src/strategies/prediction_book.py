@@ -20,6 +20,7 @@ logger = get_logger(__name__)
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 PREDICTION_POSITIONS_FILE = DATA_DIR / "prediction_positions.json"
+PENDING_LIMIT_ORDERS_FILE = DATA_DIR / "pending_limit_orders.json"
 
 
 class PredictionPosition:
@@ -59,6 +60,43 @@ class PredictionPosition:
         )
 
 
+class PendingLimitOrder:
+    """Orden limit de compra pendiente de ejecucion."""
+
+    def __init__(
+        self,
+        symbol: str,
+        order_id: int,
+        quote_qty: float,
+        limit_price: float,
+        created_at: str,
+    ) -> None:
+        self.symbol = symbol
+        self.order_id = order_id
+        self.quote_qty = quote_qty
+        self.limit_price = limit_price
+        self.created_at = created_at
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "order_id": self.order_id,
+            "quote_qty": self.quote_qty,
+            "limit_price": self.limit_price,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PendingLimitOrder:
+        return cls(
+            symbol=data["symbol"],
+            order_id=data["order_id"],
+            quote_qty=data["quote_qty"],
+            limit_price=data["limit_price"],
+            created_at=data["created_at"],
+        )
+
+
 class PredictionBook:
     """Gestiona el inventario de la estrategia Prediction.
 
@@ -69,7 +107,9 @@ class PredictionBook:
 
     def __init__(self) -> None:
         self._positions: list[PredictionPosition] = []
+        self._pending_orders: list[PendingLimitOrder] = []
         self._load_positions()
+        self._load_pending_orders()
 
     # ------------------------------------------------------------------
     # Persistencia
@@ -94,6 +134,84 @@ class PredictionBook:
                 self._positions = []
         else:
             logger.info("Prediction book: sin posiciones previas.")
+
+    def _load_pending_orders(self) -> None:
+        if PENDING_LIMIT_ORDERS_FILE.exists():
+            try:
+                raw = json.loads(PENDING_LIMIT_ORDERS_FILE.read_text())
+                self._pending_orders = [
+                    PendingLimitOrder.from_dict(o)
+                    for o in raw.get("orders", [])
+                ]
+                if self._pending_orders:
+                    logger.info(
+                        "Pending limit orders: %d cargadas",
+                        len(self._pending_orders),
+                    )
+            except (json.JSONDecodeError, KeyError) as exc:
+                logger.warning(
+                    "Error leyendo pending_limit_orders.json: %s", exc,
+                )
+                self._pending_orders = []
+
+    def _save_pending_orders(self) -> None:
+        data = {
+            "orders": [o.to_dict() for o in self._pending_orders],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        PENDING_LIMIT_ORDERS_FILE.write_text(json.dumps(data, indent=2))
+
+    @property
+    def pending_orders(self) -> list[PendingLimitOrder]:
+        return list(self._pending_orders)
+
+    @property
+    def pending_symbols(self) -> set[str]:
+        """Simbolos con orden limit pendiente."""
+        return {o.symbol for o in self._pending_orders}
+
+    @property
+    def pending_invested_usdt(self) -> float:
+        """USDT reservado en ordenes limit pendientes."""
+        return sum(o.quote_qty for o in self._pending_orders)
+
+    def record_pending_order(
+        self,
+        symbol: str,
+        order_id: int,
+        quote_qty: float,
+        limit_price: float,
+    ) -> None:
+        """Registra una orden limit de compra pendiente."""
+        pending = PendingLimitOrder(
+            symbol=symbol,
+            order_id=order_id,
+            quote_qty=quote_qty,
+            limit_price=limit_price,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self._pending_orders.append(pending)
+        self._save_pending_orders()
+        logger.info(
+            "Pending limit: %s registrada (orderId=%d, price=%.8f, ~$%.2f)",
+            symbol,
+            order_id,
+            limit_price,
+            quote_qty,
+        )
+
+    def remove_pending_order(self, order_id: int) -> PendingLimitOrder | None:
+        """Elimina una orden pendiente por ID. Devuelve la orden o None."""
+        order = next(
+            (o for o in self._pending_orders if o.order_id == order_id),
+            None,
+        )
+        if order is not None:
+            self._pending_orders = [
+                o for o in self._pending_orders if o.order_id != order_id
+            ]
+            self._save_pending_orders()
+        return order
 
     def save_positions(self) -> None:
         data = {
