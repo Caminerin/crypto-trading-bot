@@ -553,8 +553,8 @@ def print_sweep_table(sweep_results: list[dict]) -> None:
 
 def _generate_tpsl_combinations() -> list[tuple[float, float]]:
     """Genera combinaciones de TP y SL donde TP >= SL."""
-    tp_values = [0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10]
-    sl_values = [0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10]
+    tp_values = [0.03, 0.04, 0.05, 0.06, 0.08]
+    sl_values = [0.03, 0.04, 0.05, 0.06, 0.08]
     combos: list[tuple[float, float]] = []
     for tp in tp_values:
         for sl in sl_values:
