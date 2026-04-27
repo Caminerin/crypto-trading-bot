@@ -36,7 +36,7 @@ class ModelConfig:
     target_pct_change: float = 0.05  # 5% TP
     stop_loss_pct: float = 0.05  # 5% SL para labels (ratio 1:1)
     target_horizon_hours: int = 48
-    buy_limit_discount: float = 0.01  # 1% descuento sobre precio actual
+    buy_limit_discount: float = 0.0  # 0% — compra a mercado para que la OCO se coloque al instante
     lookback_hours: int = 120
     candle_interval: str = "1h"
     retrain_interval_days: int = 7
