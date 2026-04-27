@@ -13,6 +13,7 @@ Este es el punto de entrada.  Coordina todos los módulos:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -33,7 +34,7 @@ from src.data.binance_client import BinanceDataClient, BinanceTradingClient
 from src.execution.executor import ExecutionResult, OrderExecutor
 from src.market.regime import MarketRegimeResult, evaluate_market_regime
 from src.model.predictor import PricePredictor
-from src.notifications.email_report import send_daily_report
+from src.notifications.email_report import send_daily_report, send_training_report
 from src.portfolio.manager import PortfolioManager, TradeAction
 from src.strategies.dca import DCAAction, DCAStrategy
 from src.strategies.momentum import MomentumAction, MomentumStrategy
@@ -991,6 +992,27 @@ def run_train_only(config: AppConfig | None = None) -> None:
         "Top 10 features:\n%s",
         importance.head(10).to_string(),
     )
+
+    # Enviar email con métricas del entrenamiento
+    top_features: list[tuple[str, float]] = [
+        (row["feature"], float(row["importance"]))
+        for _, row in importance.head(15).iterrows()
+    ]
+    best_tpsl: dict[str, object] | None = None
+    if BEST_TPSL_FILE.exists():
+        try:
+            best_tpsl = json.loads(BEST_TPSL_FILE.read_text())
+        except Exception:
+            pass
+    try:
+        send_training_report(
+            config=config.email,
+            metrics=metrics,
+            top_features=top_features,
+            best_tpsl=best_tpsl,
+        )
+    except Exception as exc:
+        logger.warning("Error enviando email de entrenamiento: %s", exc)
 
 
 def _get_model_info(config: AppConfig) -> dict[str, object]:

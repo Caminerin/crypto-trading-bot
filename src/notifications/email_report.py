@@ -483,6 +483,270 @@ def _build_model_info_section(model_info: dict[str, object]) -> str:
     )
 
 
+def send_training_report(
+    config: EmailConfig,
+    metrics: dict[str, object],
+    top_features: list[tuple[str, float]] | None = None,
+    best_tpsl: dict[str, object] | None = None,
+) -> bool:
+    """Envía un email con las métricas del entrenamiento del modelo.
+
+    Devuelve True si el envío fue exitoso.
+    """
+    if not config.mailjet_api_key or not config.mailjet_api_secret:
+        logger.warning("Mailjet API key/secret no configuradas. No se envía email.")
+        return False
+
+    try:
+        from mailjet_rest import Client as MailjetClient
+    except ImportError:
+        logger.error("mailjet-rest no está instalado. Ejecuta: pip install mailjet-rest")
+        return False
+
+    subject = _build_training_subject(metrics)
+    html_body = _build_training_html(metrics, top_features, best_tpsl)
+
+    mailjet = MailjetClient(
+        auth=(config.mailjet_api_key, config.mailjet_api_secret),
+        version="v3.1",
+    )
+
+    data = {
+        "Messages": [
+            {
+                "From": {"Email": config.email_from, "Name": "Crypto Trading Bot"},
+                "To": [
+                    {"Email": addr.strip()}
+                    for addr in config.email_to.split(",")
+                    if addr.strip()
+                ],
+                "Subject": subject,
+                "HTMLPart": html_body,
+            }
+        ]
+    }
+
+    try:
+        response = mailjet.send.create(data=data)
+        status = response.status_code
+        logger.info("Email de entrenamiento enviado — status=%d", status)
+        if status != 200:
+            logger.error("Mailjet respuesta: %s", response.json())
+        return status == 200
+    except Exception as exc:
+        logger.error("Error enviando email de entrenamiento: %s", exc)
+        return False
+
+
+def _build_training_subject(metrics: dict[str, object]) -> str:
+    auc = metrics.get("mean_auc", 0)
+    precision = metrics.get("cv_precision_1", 0)
+    recall = metrics.get("cv_recall_1", 0)
+    return (
+        f"Modelo ML Entrenado — "
+        f"AUC: {float(auc):.3f} | "
+        f"Precisión: {float(precision):.0%} | "
+        f"Recall: {float(recall):.0%}"
+    )
+
+
+def _build_training_html(
+    metrics: dict[str, object],
+    top_features: list[tuple[str, float]] | None = None,
+    best_tpsl: dict[str, object] | None = None,
+) -> str:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    mean_auc = float(metrics.get("mean_auc", 0))
+    accuracy = float(metrics.get("cv_accuracy", 0))
+    precision = float(metrics.get("cv_precision_1", 0))
+    recall = float(metrics.get("cv_recall_1", 0))
+    f1 = float(metrics.get("cv_f1_1", 0))
+    samples = int(metrics.get("samples", 0))
+    positive_rate = float(metrics.get("positive_rate", 0))
+    n_feat_orig = int(metrics.get("n_features_original", 0))
+    n_feat_sel = int(metrics.get("n_features_selected", 0))
+
+    # AUC por modelo base
+    auc_lgbm = float(metrics.get("auc_lgbm", 0))
+    auc_xgb = float(metrics.get("auc_xgb", 0))
+    auc_rf = float(metrics.get("auc_rf", 0))
+    auc_et = float(metrics.get("auc_et", 0))
+
+    # Color del AUC
+    if mean_auc >= 0.70:
+        auc_color = "#28a745"
+        auc_label = "BUENO"
+    elif mean_auc >= 0.60:
+        auc_color = "#ffc107"
+        auc_label = "ACEPTABLE"
+    else:
+        auc_color = "#dc3545"
+        auc_label = "BAJO"
+
+    _cell = 'style="padding:6px;border:1px solid #ddd"'
+
+    # Sección de métricas principales
+    metrics_html = (
+        '<h2>Métricas del Modelo</h2>'
+        f'<div style="background:{"#d4edda" if mean_auc >= 0.65 else "#fff3cd"};'
+        f'padding:10px;border-radius:6px;margin-bottom:10px">'
+        f'<strong style="color:{auc_color};font-size:18px">'
+        f'AUC: {mean_auc:.4f} — {auc_label}</strong>'
+        '</div>'
+        '<table style="border-collapse:collapse;width:100%">'
+        '<tr>'
+        f'<td {_cell}><strong>AUC medio (CV)</strong></td>'
+        f'<td {_cell} style="font-weight:bold;color:{auc_color}">{mean_auc:.4f}</td>'
+        '</tr><tr>'
+        f'<td {_cell}><strong>Accuracy</strong></td>'
+        f'<td {_cell}>{accuracy:.1%}</td>'
+        '</tr><tr>'
+        f'<td {_cell}><strong>Precisión (clase 1)</strong></td>'
+        f'<td {_cell}>{precision:.1%}</td>'
+        '</tr><tr>'
+        f'<td {_cell}><strong>Recall (clase 1)</strong></td>'
+        f'<td {_cell}>{recall:.1%}</td>'
+        '</tr><tr>'
+        f'<td {_cell}><strong>F1 (clase 1)</strong></td>'
+        f'<td {_cell}>{f1:.1%}</td>'
+        '</tr><tr>'
+        f'<td {_cell}><strong>Muestras de entrenamiento</strong></td>'
+        f'<td {_cell}>{samples:,}</td>'
+        '</tr><tr>'
+        f'<td {_cell}><strong>Tasa de positivos</strong></td>'
+        f'<td {_cell}>{positive_rate:.1%}</td>'
+        '</tr><tr>'
+        f'<td {_cell}><strong>Features originales</strong></td>'
+        f'<td {_cell}>{n_feat_orig}</td>'
+        '</tr><tr>'
+        f'<td {_cell}><strong>Features seleccionadas</strong></td>'
+        f'<td {_cell}>{n_feat_sel}</td>'
+        '</tr>'
+        '</table>'
+    )
+
+    # Sección AUC por modelo
+    models_html = (
+        '<h2>AUC por Modelo Base</h2>'
+        '<table style="border-collapse:collapse;width:100%">'
+        '<tr style="background:#f8f9fa">'
+        f'<th {_cell}>Modelo</th>'
+        f'<th {_cell}>AUC</th>'
+        f'<th {_cell}>Rendimiento</th>'
+        '</tr>'
+    )
+    for name, auc_val in [
+        ("LightGBM", auc_lgbm),
+        ("XGBoost", auc_xgb),
+        ("RandomForest", auc_rf),
+        ("ExtraTrees", auc_et),
+    ]:
+        bar_w = int(auc_val * 100)
+        bar_c = "#28a745" if auc_val >= 0.65 else "#ffc107" if auc_val >= 0.55 else "#dc3545"
+        models_html += (
+            '<tr>'
+            f'<td {_cell}><strong>{name}</strong></td>'
+            f'<td {_cell}>{auc_val:.4f}</td>'
+            f'<td {_cell}>'
+            f'<div style="background:#eee;border-radius:4px;overflow:hidden;width:150px">'
+            f'<div style="background:{bar_c};height:14px;width:{bar_w}%"></div>'
+            f'</div></td>'
+            '</tr>'
+        )
+    models_html += '</table>'
+
+    # Sección top features
+    features_html = ""
+    if top_features:
+        feat_rows = ""
+        for feat_name, importance in top_features[:15]:
+            bar_w = int(importance * 100 * 5)  # escala x5 para mejor visual
+            bar_w = min(bar_w, 100)
+            feat_rows += (
+                '<tr>'
+                f'<td {_cell}>{feat_name}</td>'
+                f'<td {_cell}>{importance:.4f}</td>'
+                f'<td {_cell}>'
+                f'<div style="background:#eee;border-radius:4px;overflow:hidden;width:150px">'
+                f'<div style="background:#007bff;height:14px;width:{bar_w}%"></div>'
+                f'</div></td>'
+                '</tr>'
+            )
+        features_html = (
+            '<h2>Top 15 Features Más Importantes</h2>'
+            '<table style="border-collapse:collapse;width:100%">'
+            '<tr style="background:#f8f9fa">'
+            f'<th {_cell}>Feature</th>'
+            f'<th {_cell}>Importancia</th>'
+            f'<th {_cell}>Peso relativo</th>'
+            '</tr>'
+            f'{feat_rows}'
+            '</table>'
+        )
+
+    # Sección TP/SL del sweep
+    tpsl_html = ""
+    if best_tpsl:
+        tp = float(best_tpsl.get("take_profit_pct", 0))
+        sl = float(best_tpsl.get("stop_loss_pct", 0))
+        comp_pnl = float(best_tpsl.get("compound_pnl_pct", 0))
+        win_pct = float(best_tpsl.get("win_pct", 0))
+        trades = int(best_tpsl.get("trades", 0))
+        max_dd = float(best_tpsl.get("max_drawdown_pct", 0))
+        avg_pnl = float(best_tpsl.get("avg_pnl_per_trade", 0))
+        sweep_days = int(best_tpsl.get("sweep_days", 30))
+
+        comp_color = "#28a745" if comp_pnl >= 0 else "#dc3545"
+        comp_sign = "+" if comp_pnl >= 0 else ""
+
+        tpsl_html = (
+            '<h2>TP/SL Seleccionado (Sweep)</h2>'
+            f'<div style="background:#e7f1ff;padding:10px;border-radius:6px;margin-bottom:10px">'
+            f'<strong style="color:#007bff;font-size:16px">'
+            f'TP={tp:.0%} / SL={sl:.0%}</strong>'
+            '</div>'
+            '<table style="border-collapse:collapse;width:100%">'
+            '<tr>'
+            f'<td {_cell}><strong>P&amp;L compuesto ({sweep_days}d)</strong></td>'
+            f'<td {_cell} style="color:{comp_color};font-weight:bold">'
+            f'{comp_sign}{comp_pnl:.1f}%</td>'
+            '</tr><tr>'
+            f'<td {_cell}><strong>P&amp;L medio/trade</strong></td>'
+            f'<td {_cell}>${avg_pnl:.4f}</td>'
+            '</tr><tr>'
+            f'<td {_cell}><strong>Win rate</strong></td>'
+            f'<td {_cell}>{win_pct:.0f}%</td>'
+            '</tr><tr>'
+            f'<td {_cell}><strong>Trades simulados</strong></td>'
+            f'<td {_cell}>{trades}</td>'
+            '</tr><tr>'
+            f'<td {_cell}><strong>Max drawdown</strong></td>'
+            f'<td {_cell}>-{max_dd:.1f}%</td>'
+            '</tr>'
+            '</table>'
+        )
+
+    return (
+        "<html>"
+        '<body style="font-family:Arial,sans-serif;max-width:800px;'
+        'margin:0 auto;padding:20px">'
+        "<h1>Crypto Trading Bot — Entrenamiento del Modelo</h1>"
+        f"<p>{now}</p>"
+        f"{metrics_html}"
+        f"{models_html}"
+        f"{features_html}"
+        f"{tpsl_html}"
+        "<hr>"
+        '<p style="color:#999;font-size:12px">'
+        "Generado automáticamente por Crypto Trading Bot. "
+        "Esto no es asesoramiento financiero."
+        "</p>"
+        "</body>"
+        "</html>"
+    )
+
+
 def _build_market_regime_section(
     market_regime: MarketRegimeResult | None,
 ) -> str:
